@@ -318,6 +318,7 @@ type WhatsAppAccount struct {
 	Pin                    string     `gorm:"size:255" json:"-"` // 6-digit 2FA PIN (encrypted)
 	CreatedByID            *uuid.UUID `gorm:"type:uuid" json:"created_by_id,omitempty"`
 	UpdatedByID            *uuid.UUID `gorm:"type:uuid" json:"updated_by_id,omitempty"`
+	PhoneNumber            string     `gorm:"size:20" json:"phone_number"` // business number, digits with country code; sent as business_phone on webhook events
 
 	// Relations
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`

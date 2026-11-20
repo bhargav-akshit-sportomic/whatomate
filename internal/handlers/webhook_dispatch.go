@@ -48,6 +48,8 @@ type MessageEventData struct {
 	// Meta sent it (button_reply, list_reply, nfm_reply with response_json).
 	ButtonID    string `json:"button_id,omitempty"`
 	Interactive any    `json:"interactive,omitempty"`
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // FlowResponseEventData is the data for message.flow_response, fired when a
@@ -67,6 +69,8 @@ type FlowResponseEventData struct {
 	ResponseJSON             string         `json:"response_json"`
 	Response                 map[string]any `json:"response,omitempty"`
 	ReplyToWhatsAppMessageID string         `json:"reply_to_whatsapp_message_id,omitempty"` // wamid of the flow message the contact opened
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // Message failure sources reported in MessageFailedEventData.Source
@@ -97,6 +101,8 @@ type MessageFailedEventData struct {
 	ErrorTitle        string             `json:"error_title,omitempty"`
 	ErrorMessage      string             `json:"error_message"`
 	ErrorDetails      string             `json:"error_details,omitempty"`
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // MessageStatusEventData is the data for message.delivered and message.read.
@@ -121,6 +127,8 @@ type MessageStatusEventData struct {
 	DeliveredAt     *time.Time `json:"delivered_at,omitempty"`
 	ReadAt          *time.Time `json:"read_at,omitempty"`
 	PricingCategory string     `json:"pricing_category,omitempty"`
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // TemplateStatusEventData is the data for template.status_updated, fired when
@@ -134,6 +142,8 @@ type TemplateStatusEventData struct {
 	Status          string `json:"status"`
 	PreviousStatus  string `json:"previous_status,omitempty"` // empty when the template is not synced here
 	Reason          string `json:"reason,omitempty"`
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // ContactEventData represents data for contact events
@@ -142,6 +152,8 @@ type ContactEventData struct {
 	ContactPhone    string `json:"contact_phone"`
 	ContactName     string `json:"contact_name"`
 	WhatsAppAccount string `json:"whatsapp_account"`
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // TransferEventData represents data for transfer events
@@ -155,6 +167,8 @@ type TransferEventData struct {
 	AgentID         *string               `json:"agent_id,omitempty"`
 	AgentName       *string               `json:"agent_name,omitempty"`
 	WhatsAppAccount string                `json:"whatsapp_account"`
+	// Business number of the sending account, digits with country code
+	BusinessPhone string `json:"business_phone,omitempty"`
 }
 
 // maxConcurrentWebhooks limits the number of concurrent webhook deliveries per dispatch
@@ -173,6 +187,9 @@ func (a *App) DispatchWebhook(orgID uuid.UUID, eventType models.WebhookEvent, da
 }
 
 func (a *App) dispatchWebhookAsync(ctx context.Context, orgID uuid.UUID, eventType string, data any) {
+	// Off the request path: may look up the account's business number
+	data = a.withEventBusinessPhone(orgID, data)
+
 	// Find all active webhooks for this org that subscribe to this event (use cache)
 	webhooks, err := a.getWebhooksCached(orgID)
 	if err != nil {

@@ -32,6 +32,8 @@ type AccountRequest struct {
 	IsDefaultOutgoing      bool   `json:"is_default_outgoing"`
 	AutoReadReceipt        bool   `json:"auto_read_receipt"`
 	BusinessCallingEnabled bool   `json:"business_calling_enabled"`
+	// Business number with country code; optional, otherwise learned from Meta
+	PhoneNumber string `json:"phone_number"`
 }
 
 // AccountResponse represents the response for an account (without sensitive data)
@@ -127,6 +129,7 @@ func (a *App) CreateAccount(r *fastglue.Request) error {
 		IsDefaultOutgoing:      req.IsDefaultOutgoing,
 		AutoReadReceipt:        req.AutoReadReceipt,
 		BusinessCallingEnabled: req.BusinessCallingEnabled,
+		PhoneNumber:            normalizeBusinessPhone(req.PhoneNumber),
 		Status:                 "active",
 		CreatedByID:            &userID,
 		UpdatedByID:            &userID,
@@ -247,6 +250,9 @@ func (a *App) UpdateAccount(r *fastglue.Request) error {
 	}
 	account.AutoReadReceipt = req.AutoReadReceipt
 	account.BusinessCallingEnabled = req.BusinessCallingEnabled
+	if phone := normalizeBusinessPhone(req.PhoneNumber); phone != "" {
+		account.PhoneNumber = phone
+	}
 
 	// Handle default flags
 	if req.IsDefaultIncoming && !account.IsDefaultIncoming {
@@ -270,6 +276,7 @@ func (a *App) UpdateAccount(r *fastglue.Request) error {
 
 	// Invalidate cache
 	a.InvalidateWhatsAppAccountCache(account.PhoneID)
+	a.forgetBusinessPhones(orgID)
 
 	a.DB.Preload("CreatedBy").Preload("UpdatedBy").First(account, "id = ?", account.ID)
 
@@ -367,6 +374,10 @@ func (a *App) TestAccountConnection(r *fastglue.Request) error {
 			"error":   "API error",
 			"details": result,
 		})
+	}
+
+	if display, ok := result["display_phone_number"].(string); ok {
+		a.rememberBusinessPhone(account, display)
 	}
 
 	// Check if this is a test/sandbox number
@@ -468,6 +479,7 @@ func accountToResponse(acc models.WhatsAppAccount) AccountResponse {
 		Status:                 acc.Status,
 		HasAccessToken:         acc.AccessToken != "",
 		HasAppSecret:           acc.AppSecret != "",
+		PhoneNumber:            acc.PhoneNumber,
 		CreatedByID:            acc.CreatedByID,
 		UpdatedByID:            acc.UpdatedByID,
 		CreatedAt:              acc.CreatedAt.Format("2006-01-02T15:04:05Z"),
@@ -813,6 +825,11 @@ func (a *App) createOrUpdateAccount(ctx context.Context, orgID uuid.UUID, phoneI
 		account.Status = "pending_registration"
 	}
 	account.IsSMB = isSMB
+	if phoneInfo != nil {
+		if phone := normalizeBusinessPhone(phoneInfo.DisplayPhoneNumber); phone != "" {
+			account.PhoneNumber = phone
+		}
+	}
 
 	// Only fill account.AppID / APIVersion if empty
 	if account.AppID == "" {

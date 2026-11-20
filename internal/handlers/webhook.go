@@ -206,6 +206,20 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 		}
 	}
 
+	// Learn each account's business number from Meta's metadata, so events
+	// dispatched while processing already carry business_phone.
+	for _, entry := range payload.Entry {
+		for _, change := range entry.Changes {
+			meta := change.Value.Metadata
+			if meta.PhoneNumberID == "" || meta.DisplayPhoneNumber == "" {
+				continue
+			}
+			if account, err := a.getWhatsAppAccountCached(meta.PhoneNumberID); err == nil {
+				a.rememberBusinessPhone(account, meta.DisplayPhoneNumber)
+			}
+		}
+	}
+
 	// Process each entry
 	for _, entry := range payload.Entry {
 		for _, change := range entry.Changes {
