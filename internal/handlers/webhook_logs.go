@@ -25,10 +25,10 @@ const (
 	// webhookResponseDrainBytes bounds how much more of a response is read and
 	// discarded so the HTTP connection can be reused.
 	webhookResponseDrainBytes = 64 << 10
-	// webhookDeliveryStaleAfter is when a delivery still "processing" is
-	// assumed lost (e.g. the server restarted mid-retry). Deliveries give up
-	// after 2 minutes, so this leaves ample margin for in-flight ones on other
-	// instances.
+	// webhookDeliveryStaleAfter is how long past its due time (next attempt,
+	// or creation for the first) a delivery still "processing" is assumed
+	// lost, e.g. Redis lost its retry entry or an in-memory retry was cut
+	// short by a restart.
 	webhookDeliveryStaleAfter = 10 * time.Minute
 	// webhookDeliverySweepInterval is how often stale deliveries are closed out.
 	webhookDeliverySweepInterval = 5 * time.Minute
@@ -56,6 +56,10 @@ type webhookLogSubject interface {
 func (d MessageEventData) webhookLogReference() (string, string) { return d.MessageID, d.ContactPhone }
 
 func (d MessageFailedEventData) webhookLogReference() (string, string) {
+	return d.MessageID, d.ContactPhone
+}
+
+func (d MessageStatusEventData) webhookLogReference() (string, string) {
 	return d.MessageID, d.ContactPhone
 }
 
@@ -90,7 +94,7 @@ func webhookFailureReason(err error) string {
 // startWebhookDelivery records a delivery about to be attempted and returns its
 // ID. Logging must never stop a webhook going out, so a failed insert is only
 // logged and uuid.Nil is returned, which the record functions ignore.
-func (a *App) startWebhookDelivery(webhook models.Webhook, eventType string, data any, jsonData []byte, headers map[string]string) uuid.UUID {
+func (a *App) startWebhookDelivery(deliveryID uuid.UUID, webhook models.Webhook, eventType string, data any, jsonData []byte, headers map[string]string) uuid.UUID {
 	var referenceID, contactPhone string
 	if subject, ok := data.(webhookLogSubject); ok {
 		referenceID, contactPhone = subject.webhookLogReference()
@@ -102,7 +106,7 @@ func (a *App) startWebhookDelivery(webhook models.Webhook, eventType string, dat
 	}
 
 	delivery := models.WebhookDelivery{
-		ID:             uuid.New(),
+		ID:             deliveryID,
 		OrganizationID: webhook.OrganizationID,
 		WebhookID:      webhook.ID,
 		WebhookName:    webhook.Name,
@@ -185,12 +189,12 @@ func (a *App) cancelWebhookDelivery(deliveryID uuid.UUID, cause error) {
 	}
 }
 
-// FailStaleWebhookDeliveries marks deliveries stuck in "processing" for longer
-// than webhookDeliveryStaleAfter as failed. Deliveries run in memory, so a
-// restart mid-retry would otherwise leave them processing forever.
+// FailStaleWebhookDeliveries marks deliveries stuck in "processing" more than
+// webhookDeliveryStaleAfter past their due time as failed, so a delivery whose
+// retry was lost does not stay processing forever.
 func (a *App) FailStaleWebhookDeliveries() int64 {
 	result := a.DB.Model(&models.WebhookDelivery{}).
-		Where("status = ? AND created_at < ?", models.WebhookDeliveryProcessing, time.Now().Add(-webhookDeliveryStaleAfter)).
+		Where("status = ? AND COALESCE(next_attempt_at, created_at) < ?", models.WebhookDeliveryProcessing, time.Now().Add(-webhookDeliveryStaleAfter)).
 		Updates(map[string]any{
 			"status":         models.WebhookDeliveryFailed,
 			"failure_reason": "Interrupted: the server stopped before the delivery finished",
@@ -238,6 +242,7 @@ type WebhookLogResponse struct {
 	FailureReason  string                       `json:"failure_reason"`
 	DurationMs     int                          `json:"duration_ms"`
 	CompletedAt    *time.Time                   `json:"completed_at"`
+	NextAttemptAt  *time.Time                   `json:"next_attempt_at,omitempty"` // still processing: when the next retry is due
 	// Detail endpoint only
 	Request  *WebhookLogRequest      `json:"request,omitempty"`
 	Response *WebhookLogResponseBody `json:"response,omitempty"`
@@ -260,7 +265,7 @@ type WebhookLogResponseBody struct {
 
 // webhookLogListColumns excludes the snapshot columns, which can be large.
 const webhookLogListColumns = `id, created_at, webhook_id, webhook_name, event, reference_id, contact_phone,
-	status, attempt_count, response_status, failure_reason, duration_ms, completed_at`
+	status, attempt_count, response_status, failure_reason, duration_ms, completed_at, next_attempt_at`
 
 func webhookLogKey(d models.WebhookDelivery) (time.Time, uuid.UUID) { return d.CreatedAt, d.ID }
 
@@ -279,6 +284,7 @@ func webhookDeliveryToResponse(d models.WebhookDelivery) WebhookLogResponse {
 		FailureReason:  d.FailureReason,
 		DurationMs:     d.DurationMs,
 		CompletedAt:    d.CompletedAt,
+		NextAttemptAt:  d.NextAttemptAt,
 	}
 }
 

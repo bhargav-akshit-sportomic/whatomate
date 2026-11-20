@@ -152,6 +152,11 @@ type WhatsAppConfig struct {
 	AppID              string `koanf:"app_id"`   // WhatsApp App ID for frontend
 	AppSecret          string `koanf:"app_secret"`
 	ConfigID           string `koanf:"config_id"` // WhatsApp Config ID for frontend
+	// RequireWebhookSignature rejects Meta webhooks that are unsigned or whose
+	// X-Hub-Signature-256 does not match the App Secret of an account they
+	// reference. Off keeps the upstream behaviour (verify only when both the
+	// header and an App Secret are present).
+	RequireWebhookSignature bool `koanf:"require_webhook_signature"`
 }
 
 type AIConfig struct {

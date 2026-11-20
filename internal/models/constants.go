@@ -230,10 +230,19 @@ const (
 	WebhookEventMessageOutgoing  WebhookEvent = "message.outgoing"
 	WebhookEventMessageSent      WebhookEvent = "message.sent"
 	WebhookEventMessageFailed    WebhookEvent = "message.failed"
+	WebhookEventMessageDelivered WebhookEvent = "message.delivered"
+	WebhookEventMessageRead      WebhookEvent = "message.read"
 	WebhookEventContactCreated   WebhookEvent = "contact.created"
 	WebhookEventTransferCreated  WebhookEvent = "transfer.created"
 	WebhookEventTransferResumed  WebhookEvent = "transfer.resumed"
 	WebhookEventTransferAssigned WebhookEvent = "transfer.assigned"
+
+	// WebhookEventMessageFlowResponse fires when a contact submits a WhatsApp
+	// Flow (an interactive nfm_reply), alongside message.incoming.
+	WebhookEventMessageFlowResponse WebhookEvent = "message.flow_response"
+	// WebhookEventTemplateStatusUpdated fires when Meta reports a template
+	// status change (APPROVED, REJECTED, PAUSED, DISABLED, ...).
+	WebhookEventTemplateStatusUpdated WebhookEvent = "template.status_updated"
 )
 
 // ActionType represents custom action types

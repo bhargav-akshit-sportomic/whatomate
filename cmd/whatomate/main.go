@@ -190,15 +190,7 @@ func runServer(args []string) {
 
 	// Initialize app with dependencies
 	// Shared HTTP client with connection pooling for external API calls
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialContext:         handlers.SSRFSafeDialer(),
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
+	httpClient := newOutboundHTTPClient()
 
 	app := &handlers.App{
 		Config:     cfg,
@@ -294,6 +286,8 @@ func runServer(args []string) {
 	// expired export files and relay workers' export updates to users
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go app.StartWebhookDeliverySweeper(sweepCtx)
+	// Send webhook retries queued in Redis (survive restarts)
+	go app.StartWebhookRetryProcessor(sweepCtx)
 	go app.StartExportSweeper(sweepCtx)
 	go oauth.NewStore(db, rdb, httpClient).StartSweeper(sweepCtx, lo.Error)
 	if err := app.StartExportUpdatesSubscriber(sweepCtx); err != nil {
@@ -312,6 +306,7 @@ func runServer(args []string) {
 			if err != nil {
 				lo.Fatal("Failed to create worker", "error", err, "worker_num", i+1)
 			}
+			w.Webhooks = app
 			workers = append(workers, w)
 
 			workerNum := i + 1
@@ -422,6 +417,10 @@ func runWorker(args []string) {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+	// Campaign sends dispatch message.sent / message.failed webhooks through
+	// the same code as the server, so deliveries appear in Webhook Logs
+	webhooks := &handlers.App{Config: cfg, DB: db, Redis: rdb, Log: lo, HTTPClient: newOutboundHTTPClient()}
+
 	// Create and run workers
 	workers := make([]*worker.Worker, *workerCount)
 	errCh := make(chan error, *workerCount)
@@ -431,6 +430,7 @@ func runWorker(args []string) {
 		if err != nil {
 			lo.Fatal("Failed to create worker", "error", err, "worker_num", i+1)
 		}
+		w.Webhooks = webhooks
 		workers[i] = w
 
 		go func(workerNum int) {
@@ -462,6 +462,8 @@ func runWorker(args []string) {
 			}
 		}
 	}
+	// Let webhooks for the last sends finish
+	webhooks.WaitForBackgroundTasks()
 	lo.Info("Workers stopped")
 }
 
@@ -680,6 +682,7 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.POST("/api/contacts/{id}/messages/{message_id}/reaction", app.SendReaction)
 	g.POST("/api/messages", app.SendMessage) // Legacy route
 	g.POST("/api/messages/template", app.SendTemplateMessage)
+	g.POST("/api/messages/send", app.SendMessageToPhone) // text/interactive/flow by phone number
 	g.POST("/api/messages/media", app.SendMediaMessage)
 	g.PUT("/api/messages/{id}/read", app.MarkMessageRead)
 
@@ -966,6 +969,20 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 		})
 	} else {
 		lo.Info("Frontend not embedded, API-only mode")
+	}
+}
+
+// newOutboundHTTPClient returns the pooled HTTP client for calls to external
+// services (webhooks, custom actions), which refuses private addresses.
+func newOutboundHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext:         handlers.SSRFSafeDialer(),
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}
 }
 

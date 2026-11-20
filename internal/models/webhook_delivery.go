@@ -41,6 +41,8 @@ type WebhookDelivery struct {
 	// per attempt in order.
 	Attempts    JSONBArray `gorm:"type:jsonb;default:'[]'" json:"attempts"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	// NextAttemptAt is when a delivery that is still processing will be retried
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 }
 
 func (WebhookDelivery) TableName() string {

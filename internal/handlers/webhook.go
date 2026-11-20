@@ -172,8 +172,20 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 	}
 
 	// Verify webhook signature before processing any fields.
-	// Find a phoneNumberID from any change to look up the account's AppSecret.
-	if len(signature) > 0 {
+	if a.Config.WhatsApp.RequireWebhookSignature {
+		secrets, knownAccounts := a.webhookSigningSecrets(payload)
+		if knownAccounts == 0 {
+			// Nothing in this payload belongs to an account here; ack so Meta stops retrying.
+			a.Log.Warn("Ignoring webhook for unknown accounts")
+			return r.SendEnvelope(map[string]string{"status": "ignored"})
+		}
+		if !signatureMatchesAny(body, signature, secrets) {
+			a.Log.Warn("Rejected webhook: missing or invalid signature",
+				"has_signature", len(signature) > 0, "app_secrets", len(secrets))
+			return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Invalid signature", nil, "")
+		}
+	} else if len(signature) > 0 {
+		// Find a phoneNumberID from any change to look up the account's AppSecret.
 		for _, entry := range payload.Entry {
 			for _, change := range entry.Changes {
 				phoneNumberID := change.Value.Metadata.PhoneNumberID
@@ -410,6 +422,17 @@ func statusPriority(status models.MessageStatus) int {
 	}
 }
 
+// claimStatusTime sets a message's delivered_at or read_at to t if it is still
+// empty, and reports whether this call set it.
+func (a *App) claimStatusTime(messageID uuid.UUID, column string, t time.Time) bool {
+	res := a.DB.Model(&models.Message{}).Where("id = ? AND "+column+" IS NULL", messageID).Update(column, t)
+	if res.Error != nil {
+		a.Log.Error("Failed to record message status time", "error", res.Error, "message_id", messageID, "column", column)
+		return false
+	}
+	return res.RowsAffected == 1
+}
+
 // updateMessageStatus applies a Meta status callback to the matching message
 // in the messages table. status.RecipientID is Meta's recipient_id; it may be
 // empty for username-only (BSUID) recipients.
@@ -440,20 +463,11 @@ func (a *App) updateMessageStatus(status WebhookStatus) {
 
 	// Delivery timestamps and pricing are recorded even when the status itself
 	// doesn't progress: Meta can send "delivered" after "read", and the logs
-	// should still show when the message was delivered. delivered_at and
-	// read_at are set once; Meta's "sent" time replaces our acceptance time.
+	// should still show when the message was delivered. Meta's "sent" time
+	// replaces our acceptance time.
 	eventTime := statusEventTime(status.Timestamp)
-	switch newStatus {
-	case models.MessageStatusSent:
+	if newStatus == models.MessageStatusSent {
 		updates["sent_at"] = eventTime
-	case models.MessageStatusDelivered:
-		if message.DeliveredAt == nil {
-			updates["delivered_at"] = eventTime
-		}
-	case models.MessageStatusRead:
-		if message.ReadAt == nil {
-			updates["read_at"] = eventTime
-		}
 	}
 	if status.Pricing != nil && status.Pricing.Category != "" && message.PricingCategory == "" {
 		updates["pricing_category"] = status.Pricing.Category
@@ -478,7 +492,22 @@ func (a *App) updateMessageStatus(status WebhookStatus) {
 		}
 	}
 
-	if len(updates) == 0 {
+	// delivered_at and read_at are set once. Claiming them atomically means
+	// that when Meta repeats a callback, even concurrently, exactly one of
+	// them fires message.delivered or message.read.
+	firstStatus := false
+	switch newStatus {
+	case models.MessageStatusDelivered:
+		if firstStatus = a.claimStatusTime(message.ID, "delivered_at", eventTime); firstStatus {
+			message.DeliveredAt = &eventTime
+		}
+	case models.MessageStatusRead:
+		if firstStatus = a.claimStatusTime(message.ID, "read_at", eventTime); firstStatus {
+			message.ReadAt = &eventTime
+		}
+	}
+
+	if len(updates) == 0 && !firstStatus {
 		a.Log.Debug("Ignoring status update - not a progression",
 			"message_id", message.ID,
 			"current_status", message.Status,
@@ -486,22 +515,42 @@ func (a *App) updateMessageStatus(status WebhookStatus) {
 		return
 	}
 
-	if err := a.DB.Model(&message).Updates(updates).Error; err != nil {
-		a.Log.Error("Failed to update message status", "error", err, "message_id", message.ID)
-		return
+	if len(updates) > 0 {
+		if err := a.DB.Model(&message).Updates(updates).Error; err != nil {
+			a.Log.Error("Failed to update message status", "error", err, "message_id", message.ID)
+			return
+		}
+	}
+
+	needsContact := (newStatus == models.MessageStatusFailed && progressed && !wasFailed) || (firstStatus && !wasFailed)
+	var contact *models.Contact
+	if needsContact {
+		var c models.Contact
+		if err := a.DB.Where("id = ? AND organization_id = ?", message.ContactID, message.OrganizationID).First(&c).Error; err != nil {
+			a.Log.Warn("Contact not found for message webhook", "error", err, "message_id", message.ID)
+		} else {
+			contact = &c
+		}
+	}
+
+	if pc, ok := updates["pricing_category"].(string); ok {
+		message.PricingCategory = pc
+	}
+	if firstStatus && !wasFailed {
+		// Meta's recipient_id is the number it actually delivered to, so it
+		// wins over the contact row, which may have been edited or deleted.
+		a.dispatchMessageStatusWebhook(&message, contact, status.RecipientID, newStatus, eventTime)
 	}
 
 	if !progressed {
-		// Only a late timestamp or pricing was recorded; the visible status,
-		// campaign stats and webhooks are unchanged.
+		// Only a late timestamp or pricing was recorded; the visible status
+		// and campaign stats are unchanged.
 		return
 	}
 
 	a.Log.Info("Updated message status", "message_id", message.ID, "status", statusValue)
 
 	if newStatus == models.MessageStatusFailed && !wasFailed {
-		// Meta's recipient_id is the number it actually tried to deliver to, so
-		// it wins over the contact row, which may have been edited or deleted.
 		failed := MessageFailedEventData{
 			Source:       MessageFailureSourceStatusCallback,
 			ContactPhone: status.RecipientID,
@@ -512,13 +561,7 @@ func (a *App) updateMessageStatus(status WebhookStatus) {
 			failed.ErrorTitle = errors[0].Title
 			failed.ErrorDetails = errors[0].ErrorData.Details
 		}
-		var contact models.Contact
-		if err := a.DB.Where("id = ? AND organization_id = ?", message.ContactID, message.OrganizationID).First(&contact).Error; err != nil {
-			a.Log.Warn("Contact not found for failed message webhook", "error", err, "message_id", message.ID)
-			a.dispatchMessageFailedWebhook(&message, nil, failed)
-		} else {
-			a.dispatchMessageFailedWebhook(&message, &contact, failed)
-		}
+		a.dispatchMessageFailedWebhook(&message, contact, failed)
 	}
 
 	// Update campaign stats and recipient status if this is a campaign message
@@ -587,6 +630,12 @@ func (a *App) processTemplateStatusUpdate(wabaID, event, templateName, templateL
 
 	// Update template for each account that has it
 	for _, account := range accounts {
+		// Status before the change, for the webhook event (empty if not synced here)
+		var previousStatus string
+		a.DB.Model(&models.Template{}).
+			Where("whats_app_account = ? AND name = ? AND language = ?", account.Name, templateName, templateLanguage).
+			Limit(1).Pluck("status", &previousStatus)
+
 		// Find and update the template
 		result := a.DB.Model(&models.Template{}).
 			Where("whats_app_account = ? AND name = ? AND language = ?", account.Name, templateName, templateLanguage).
@@ -611,7 +660,77 @@ func (a *App) processTemplateStatusUpdate(wabaID, event, templateName, templateL
 				"reason", reason,
 			)
 		}
+
+		// Fired even when the template is not synced here: templates are
+		// often created directly in Meta.
+		a.DispatchWebhook(account.OrganizationID, models.WebhookEventTemplateStatusUpdated, TemplateStatusEventData{
+			WhatsAppAccount: account.Name,
+			WABAID:          wabaID,
+			TemplateName:    templateName,
+			Language:        templateLanguage,
+			Status:          status,
+			PreviousStatus:  previousStatus,
+			Reason:          reason,
+		})
 	}
+}
+
+// webhookSigningSecrets returns the App Secrets of the accounts a Meta
+// webhook payload references (by phone_number_id, or by WABA id for
+// account-level changes such as template status updates) and how many such
+// accounts exist here. Meta signs each delivery with one app's secret, so a
+// genuine payload matches at least one of them.
+func (a *App) webhookSigningSecrets(payload WebhookPayload) ([][]byte, int) {
+	var secrets [][]byte
+	seen := map[string]bool{}
+	known := 0
+	add := func(acc *models.WhatsAppAccount) {
+		known++
+		if acc.AppSecret != "" && !seen[acc.AppSecret] {
+			seen[acc.AppSecret] = true
+			secrets = append(secrets, []byte(acc.AppSecret))
+		}
+	}
+	for _, entry := range payload.Entry {
+		hasPhone := false
+		for _, change := range entry.Changes {
+			phoneNumberID := change.Value.Metadata.PhoneNumberID
+			if phoneNumberID == "" {
+				continue
+			}
+			hasPhone = true
+			if acc, err := a.getWhatsAppAccountCached(phoneNumberID); err == nil {
+				add(acc)
+			}
+		}
+		if hasPhone || entry.ID == "" {
+			continue
+		}
+		var accounts []models.WhatsAppAccount
+		if err := a.DB.Where("business_id = ?", entry.ID).Find(&accounts).Error; err != nil {
+			a.Log.Error("Failed to load accounts for webhook signature", "waba_id", entry.ID, "error", err)
+			continue
+		}
+		for i := range accounts {
+			a.decryptAccountSecrets(&accounts[i])
+			add(&accounts[i])
+		}
+	}
+	return secrets, known
+}
+
+// signatureMatchesAny reports whether signature is a valid X-Hub-Signature-256
+// for body under any of the secrets.
+func signatureMatchesAny(body, signature []byte, secrets [][]byte) bool {
+	if len(signature) == 0 {
+		return false
+	}
+	for _, secret := range secrets {
+		if verifyWebhookSignature(body, signature, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyWebhookSignature verifies the X-Hub-Signature-256 header from Meta.
