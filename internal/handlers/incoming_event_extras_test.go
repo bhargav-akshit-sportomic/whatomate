@@ -146,6 +146,7 @@ func TestIncomingTemplateQuickReply_ForwardsPayloadAsButtonID(t *testing.T) {
 
 	msg := metaInboundMessage(t, `{
 		"from": "919876543210", "id": "wamid.qr_`+uuid.New().String()[:8]+`", "timestamp": "1795172232", "type": "button",
+		"context": {"from": "15550001111", "id": "wamid.sent_elsewhere"},
 		"button": {"text": "Yes", "payload": "nudge_yes"}
 	}`)
 
@@ -156,6 +157,10 @@ func TestIncomingTemplateQuickReply_ForwardsPayloadAsButtonID(t *testing.T) {
 	require.Len(t, incoming, 1)
 	assert.Equal(t, "button_reply", incoming[0]["message_type"])
 	assert.Equal(t, "nudge_yes", incoming[0]["button_id"])
+	assert.Equal(t, "wamid.sent_elsewhere", incoming[0]["reply_to_whatsapp_message_id"],
+		"Meta's id of the replied message is forwarded even when Whatomate never sent it")
+	_, hasWhatomateReply := incoming[0]["reply_to_message_id"]
+	assert.False(t, hasWhatomateReply, "no Whatomate message to point at")
 	_, hasInteractive := incoming[0]["interactive"]
 	assert.False(t, hasInteractive, "a template quick-reply has no interactive object")
 }
@@ -174,6 +179,8 @@ func TestIncomingText_OmitsButtonAndInteractive(t *testing.T) {
 	incoming := payloadsFor(captured(), models.WebhookEventMessageIncoming)
 	require.Len(t, incoming, 1)
 	assert.Equal(t, "book", incoming[0]["content"])
+	_, hasReplyWamid := incoming[0]["reply_to_whatsapp_message_id"]
+	assert.False(t, hasReplyWamid, "not a reply")
 	_, hasButton := incoming[0]["button_id"]
 	_, hasInteractive := incoming[0]["interactive"]
 	assert.False(t, hasButton)

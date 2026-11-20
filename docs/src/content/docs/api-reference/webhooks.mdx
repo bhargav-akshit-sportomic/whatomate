@@ -196,6 +196,7 @@ ids also get:
 | `whatsapp_message_id` | Always: the inbound wamid |
 | `button_id` | Reply button or list row `id`, or a template quick-reply `payload` |
 | `interactive` | Interactive replies: Meta's `interactive` object as received (`button_reply`, `list_reply`, or `nfm_reply` with `response_json`) |
+| `reply_to_whatsapp_message_id` | Replies: Meta's id of the message replied to, also when it was not sent through Whatomate (`reply_to_message_id` is Whatomate's id and only set when it was) |
 
 ```json
 {
