@@ -191,7 +191,7 @@ func (a *App) processIncomingMessageFull(phoneNumberID string, msg IncomingTextM
 	if msg.Context != nil && msg.Context.ID != "" {
 		replyToWAMID = msg.Context.ID
 	}
-	a.saveIncomingMessage(account, contact, msg.ID, messageType, messageText, mediaInfo, replyToWAMID)
+	a.saveIncomingMessageWithEvent(account, contact, msg.ID, messageType, messageText, mediaInfo, replyToWAMID, incomingEventExtrasFor(msg, buttonID))
 
 	// Clear chatbot tracking since client has replied
 	a.ClearContactChatbotTracking(contact.ID)
@@ -1542,8 +1542,43 @@ type MediaInfo struct {
 	MediaFilename string
 }
 
+// incomingEventExtras carries the parts of an inbound message that the
+// messages table does not keep but webhook receivers need to route on.
+type incomingEventExtras struct {
+	ButtonID    string
+	Interactive any
+	FlowReply   *incomingFlowReply
+}
+
+type incomingFlowReply struct {
+	Name         string
+	Body         string
+	ResponseJSON string
+}
+
+// incomingEventExtrasFor builds the webhook extras for an inbound message.
+// buttonID is the id extractMessageContent already resolved (button_reply,
+// list_reply or template quick-reply payload).
+func incomingEventExtrasFor(msg IncomingTextMessage, buttonID string) incomingEventExtras {
+	extras := incomingEventExtras{ButtonID: buttonID}
+	if msg.Interactive == nil {
+		return extras
+	}
+	extras.Interactive = msg.Interactive
+	if nfm := msg.Interactive.NFMReply; nfm != nil {
+		extras.FlowReply = &incomingFlowReply{Name: nfm.Name, Body: nfm.Body, ResponseJSON: nfm.ResponseJSON}
+	}
+	return extras
+}
+
 // saveIncomingMessage saves an incoming message to the messages table
 func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *models.Contact, whatsappMsgID, msgType, content string, mediaInfo *MediaInfo, replyToWAMID string) {
+	a.saveIncomingMessageWithEvent(account, contact, whatsappMsgID, msgType, content, mediaInfo, replyToWAMID, incomingEventExtras{})
+}
+
+// saveIncomingMessageWithEvent saves an incoming message and dispatches
+// message.incoming (with the extras), plus message.flow_response for a Flow reply.
+func (a *App) saveIncomingMessageWithEvent(account *models.WhatsAppAccount, contact *models.Contact, whatsappMsgID, msgType, content string, mediaInfo *MediaInfo, replyToWAMID string, extras incomingEventExtras) {
 	now := time.Now()
 
 	message := models.Message{
@@ -1628,7 +1663,41 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		ReplyToMessageID: replyToMessageIDString(&message),
 		WhatsAppAccount:  account.Name,
 		Direction:        models.DirectionIncoming,
+
+		WhatsAppMessageID: whatsappMsgID,
+		ButtonID:          extras.ButtonID,
+		Interactive:       extras.Interactive,
 	})
+
+	if extras.FlowReply != nil {
+		a.DispatchWebhook(account.OrganizationID, models.WebhookEventMessageFlowResponse,
+			flowResponseEventData(&message, contact, account.Name, replyToWAMID, *extras.FlowReply))
+	}
+}
+
+// flowResponseEventData builds the message.flow_response payload. A
+// response_json that is not valid JSON is still forwarded as the raw string.
+func flowResponseEventData(message *models.Message, contact *models.Contact, accountName, replyToWAMID string, reply incomingFlowReply) FlowResponseEventData {
+	data := FlowResponseEventData{
+		MessageID:                message.ID.String(),
+		WhatsAppMessageID:        message.WhatsAppMessageID,
+		ContactID:                contact.ID.String(),
+		ContactPhone:             contact.PhoneNumber,
+		ContactName:              contact.ProfileName,
+		WhatsAppAccount:          accountName,
+		FlowName:                 reply.Name,
+		Body:                     reply.Body,
+		ResponseJSON:             reply.ResponseJSON,
+		ReplyToWhatsAppMessageID: replyToWAMID,
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(reply.ResponseJSON), &parsed); err == nil {
+		data.Response = parsed
+		if token, ok := parsed["flow_token"].(string); ok {
+			data.FlowToken = token
+		}
+	}
+	return data
 }
 
 // isWithinBusinessHours checks if current time is within configured business hours

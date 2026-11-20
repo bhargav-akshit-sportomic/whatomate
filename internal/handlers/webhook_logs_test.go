@@ -28,8 +28,9 @@ type webhookLogsFixture struct {
 	user    *models.User
 	webhook models.Webhook
 
-	mu       sync.Mutex
-	received [][]byte
+	mu          sync.Mutex
+	received    [][]byte
+	deliveryIDs []string // X-Webhook-Delivery-Id of each request
 	// respond decides each response; call is 1-based.
 	respond func(call int32, w http.ResponseWriter)
 	calls   atomic.Int32
@@ -50,6 +51,7 @@ func newWebhookLogsFixture(t *testing.T) *webhookLogsFixture {
 		body, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.received = append(f.received, body)
+		f.deliveryIDs = append(f.deliveryIDs, r.Header.Get("X-Webhook-Delivery-Id"))
 		respond := f.respond
 		f.mu.Unlock()
 		respond(f.calls.Add(1), w)
@@ -82,6 +84,22 @@ func (f *webhookLogsFixture) receivedBodies() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([][]byte(nil), f.received...)
+}
+
+func (f *webhookLogsFixture) receivedDeliveryIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deliveryIDs...)
+}
+
+// retryDue returns when a delivery is next due in the Redis retry queue.
+func (f *webhookLogsFixture) retryDue(t *testing.T, id uuid.UUID) (time.Time, bool) {
+	t.Helper()
+	score, err := f.app.Redis.ZScore(context.Background(), webhookRetryQueueKey, id.String()).Result()
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(int64(score)), true
 }
 
 func (f *webhookLogsFixture) onlyDelivery(t *testing.T) models.WebhookDelivery {
@@ -123,10 +141,16 @@ func TestSendWebhook_RecordsSuccessfulDelivery(t *testing.T) {
 	for _, v := range d.RequestHeaders {
 		assert.NotContains(t, v, "s3cret", "the signing secret itself is never recorded")
 	}
+	assert.Equal(t, d.ID.String(), d.RequestHeaders["X-Webhook-Delivery-Id"])
+	assert.Equal(t, []string{d.ID.String()}, f.receivedDeliveryIDs())
+	_, queued := f.retryDue(t, d.ID)
+	assert.False(t, queued, "a delivered webhook is not left in the retry queue")
 }
 
-func TestSendWebhook_RecordsEveryAttemptThenFailure(t *testing.T) {
+// Without Redis, deliveries fall back to 3 in-memory attempts.
+func TestSendWebhook_WithoutRedis_RecordsEveryAttemptThenFailure(t *testing.T) {
 	f := newWebhookLogsFixture(t)
+	f.app.Redis = nil
 	f.setRespond(func(_ int32, w http.ResponseWriter) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("down for maintenance"))
@@ -148,8 +172,9 @@ func TestSendWebhook_RecordsEveryAttemptThenFailure(t *testing.T) {
 	}
 }
 
-func TestSendWebhook_SuccessAfterRetry(t *testing.T) {
+func TestSendWebhook_WithoutRedis_SuccessAfterRetry(t *testing.T) {
 	f := newWebhookLogsFixture(t)
+	f.app.Redis = nil
 	f.setRespond(func(call int32, w http.ResponseWriter) {
 		if call == 1 {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -166,8 +191,9 @@ func TestSendWebhook_SuccessAfterRetry(t *testing.T) {
 	assert.Equal(t, "HTTP 500 Internal Server Error", d.Attempts[0].(map[string]any)["error"])
 }
 
-func TestSendWebhook_CancelledDeliveryIsClosedOut(t *testing.T) {
+func TestSendWebhook_WithoutRedis_CancelledDeliveryIsClosedOut(t *testing.T) {
 	f := newWebhookLogsFixture(t)
+	f.app.Redis = nil
 	f.setRespond(func(_ int32, w http.ResponseWriter) { w.WriteHeader(http.StatusBadGateway) })
 
 	// The context ends during the 2s backoff before the second attempt.

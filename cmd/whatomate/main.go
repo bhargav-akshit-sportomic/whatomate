@@ -286,6 +286,8 @@ func runServer(args []string) {
 	// expired export files and relay workers' export updates to users
 	sweepCtx, sweepCancel := context.WithCancel(context.Background())
 	go app.StartWebhookDeliverySweeper(sweepCtx)
+	// Send webhook retries queued in Redis (survive restarts)
+	go app.StartWebhookRetryProcessor(sweepCtx)
 	go app.StartExportSweeper(sweepCtx)
 	go oauth.NewStore(db, rdb, httpClient).StartSweeper(sweepCtx, lo.Error)
 	if err := app.StartExportUpdatesSubscriber(sweepCtx); err != nil {
@@ -680,6 +682,7 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.POST("/api/contacts/{id}/messages/{message_id}/reaction", app.SendReaction)
 	g.POST("/api/messages", app.SendMessage) // Legacy route
 	g.POST("/api/messages/template", app.SendTemplateMessage)
+	g.POST("/api/messages/send", app.SendMessageToPhone) // text/interactive/flow by phone number
 	g.POST("/api/messages/media", app.SendMediaMessage)
 	g.PUT("/api/messages/{id}/read", app.MarkMessageRead)
 

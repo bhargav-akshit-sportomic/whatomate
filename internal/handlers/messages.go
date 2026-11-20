@@ -73,6 +73,11 @@ type OutgoingMessageRequest struct {
 	FlowCTA         string // CTA button text (max 20 chars)
 	FlowToken       string // Unique token for flow response tracking
 	FlowFirstScreen string // First screen name to navigate to
+	// Set by API callers that launch their own flows: navigate (default) or
+	// data_exchange, initial screen data for navigate, and an image header.
+	FlowAction         string
+	FlowActionData     map[string]any
+	FlowHeaderImageURL string
 
 	// Reply context
 	ReplyToMessage *models.Message
@@ -248,7 +253,17 @@ func (a *App) SendOutgoingMessage(ctx context.Context, req OutgoingMessageReques
 			if req.FlowID == "" {
 				return "", fmt.Errorf("flow ID is required for flow messages")
 			}
-			return a.WhatsApp.SendFlowMessage(sendCtx, waAccount, rcpt, req.FlowID, req.FlowHeader, req.BodyText, req.FlowCTA, req.FlowToken, req.FlowFirstScreen)
+			return a.WhatsApp.SendFlow(sendCtx, waAccount, rcpt, whatsapp.FlowMessage{
+				FlowID:         req.FlowID,
+				HeaderText:     req.FlowHeader,
+				HeaderImageURL: req.FlowHeaderImageURL,
+				BodyText:       req.BodyText,
+				CTAText:        req.FlowCTA,
+				FlowToken:      req.FlowToken,
+				FlowAction:     req.FlowAction,
+				FirstScreen:    req.FlowFirstScreen,
+				FlowActionData: req.FlowActionData,
+			})
 
 		default:
 			return "", fmt.Errorf("unsupported message type: %s", req.Type)

@@ -91,6 +91,9 @@ type WebhookRequest struct {
 	Headers  map[string]string `json:"headers"`
 	Secret   string            `json:"secret"`
 	IsActive bool              `json:"is_active"`
+	// Account names to receive events for. Omitted on update keeps the
+	// current list; an empty list means every account.
+	WhatsAppAccounts *[]string `json:"whatsapp_accounts"`
 }
 
 // WebhookResponse represents the API response for a webhook
@@ -104,6 +107,9 @@ type WebhookResponse struct {
 	HasSecret bool              `json:"has_secret"`
 	CreatedAt string            `json:"created_at"`
 	UpdatedAt string            `json:"updated_at"`
+
+	// Empty means the webhook receives events for every account
+	WhatsAppAccounts []string `json:"whatsapp_accounts"`
 }
 
 // AvailableWebhookEvents returns the list of available webhook event types
@@ -114,6 +120,8 @@ var AvailableWebhookEvents = []map[string]string{
 	{"value": string(models.WebhookEventMessageFailed), "label": "Message Failed", "description": "When an outgoing message fails to send or Meta reports it as failed"},
 	{"value": string(models.WebhookEventMessageDelivered), "label": "Message Delivered", "description": "When Meta reports an outgoing message was delivered to the contact's phone"},
 	{"value": string(models.WebhookEventMessageRead), "label": "Message Read", "description": "When Meta reports the contact read an outgoing message"},
+	{"value": string(models.WebhookEventMessageFlowResponse), "label": "Flow Response", "description": "When a contact submits a WhatsApp Flow (includes the flow's response_json)"},
+	{"value": string(models.WebhookEventTemplateStatusUpdated), "label": "Template Status Updated", "description": "When Meta approves, rejects, pauses or disables a message template"},
 	{"value": string(models.WebhookEventContactCreated), "label": "Contact Created", "description": "When a new contact is created"},
 	{"value": string(models.WebhookEventTransferCreated), "label": "Transfer Created", "description": "When a transfer to human agent is requested"},
 	{"value": string(models.WebhookEventTransferAssigned), "label": "Transfer Assigned", "description": "When a transfer is assigned to an agent"},
@@ -206,6 +214,11 @@ func (a *App) CreateWebhook(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "at least one event must be selected", nil, "")
 	}
 
+	accounts, errMsg := a.validWebhookAccounts(orgID, req.WhatsAppAccounts)
+	if errMsg != "" {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, errMsg, nil, "")
+	}
+
 	// Convert headers to JSONB
 	headers := models.JSONB{}
 	for k, v := range req.Headers {
@@ -226,6 +239,8 @@ func (a *App) CreateWebhook(r *fastglue.Request) error {
 		Headers:        headers,
 		Secret:         secret,
 		IsActive:       true,
+
+		WhatsAppAccounts: accounts,
 	}
 
 	if err := a.DB.Create(&webhook).Error; err != nil {
@@ -277,6 +292,13 @@ func (a *App) UpdateWebhook(r *fastglue.Request) error {
 	}
 	if len(req.Events) > 0 {
 		webhook.Events = req.Events
+	}
+	if req.WhatsAppAccounts != nil {
+		accounts, errMsg := a.validWebhookAccounts(orgID, req.WhatsAppAccounts)
+		if errMsg != "" {
+			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, errMsg, nil, "")
+		}
+		webhook.WhatsAppAccounts = accounts
 	}
 
 	// Update headers if provided
@@ -380,8 +402,9 @@ func (a *App) TestWebhook(r *fastglue.Request) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	headers := webhookRequestHeaders(*webhook, jsonData)
-	deliveryID := a.startWebhookDelivery(*webhook, payload.Event, testData, jsonData, headers)
+	deliveryID := uuid.New()
+	headers := webhookRequestHeaders(*webhook, jsonData, deliveryID)
+	deliveryID = a.startWebhookDelivery(deliveryID, *webhook, payload.Event, testData, jsonData, headers)
 	result := a.sendWebhookRequest(ctx, *webhook, jsonData, headers)
 	a.recordWebhookAttempt(deliveryID, 1, result, true)
 	if !result.ok() {
@@ -403,7 +426,48 @@ func webhookAuditSnapshot(wh *models.Webhook) map[string]any {
 		"url":       wh.URL,
 		"events":    events,
 		"is_active": wh.IsActive,
+
+		"whatsapp_accounts": webhookAccountNames(wh),
 	}
+}
+
+// webhookAccountNames returns the webhook's account filter as a non-nil slice.
+func webhookAccountNames(wh *models.Webhook) []string {
+	names := make([]string, len(wh.WhatsAppAccounts))
+	copy(names, wh.WhatsAppAccounts)
+	return names
+}
+
+// validWebhookAccounts checks that every requested account exists in the org
+// and returns the de-duplicated list (empty when none were given).
+func (a *App) validWebhookAccounts(orgID uuid.UUID, requested *[]string) (models.StringArray, string) {
+	accounts := models.StringArray{}
+	if requested == nil {
+		return accounts, ""
+	}
+	seen := map[string]bool{}
+	for _, name := range *requested {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		accounts = append(accounts, name)
+	}
+	if len(accounts) == 0 {
+		return accounts, ""
+	}
+	var found int64
+	if err := a.DB.Model(&models.WhatsAppAccount{}).
+		Where("organization_id = ? AND name IN ?", orgID, []string(accounts)).
+		Count(&found).Error; err != nil {
+		a.Log.Error("Failed to check webhook accounts", "error", err)
+		return nil, "Failed to check WhatsApp accounts"
+	}
+	if int(found) != len(accounts) {
+		return nil, "whatsapp_accounts contains an account that does not exist in this organization"
+	}
+	return accounts, ""
 }
 
 func webhookToResponse(wh models.Webhook) WebhookResponse {
@@ -429,5 +493,7 @@ func webhookToResponse(wh models.Webhook) WebhookResponse {
 		HasSecret: wh.Secret != "",
 		CreatedAt: wh.CreatedAt.Format(time.RFC3339),
 		UpdatedAt: wh.UpdatedAt.Format(time.RFC3339),
+
+		WhatsAppAccounts: webhookAccountNames(&wh),
 	}
 }

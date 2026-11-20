@@ -38,10 +38,35 @@ type MessageEventData struct {
 	WhatsAppAccount  string             `json:"whatsapp_account"`
 	Direction        models.Direction   `json:"direction,omitempty"`
 	SentByUserID     string             `json:"sent_by_user_id,omitempty"`
-	// Set on message.sent when known
+	// Set on message.sent when known, and on message.incoming (the inbound wamid)
 	WhatsAppMessageID string `json:"whatsapp_message_id,omitempty"`
 	TemplateName      string `json:"template_name,omitempty"`
 	CampaignID        string `json:"campaign_id,omitempty"`
+	// message.incoming only. Content carries just the button/row title, so
+	// receivers that route on ids need ButtonID (button_reply / list_reply id,
+	// or a template quick-reply payload) and the raw interactive object as
+	// Meta sent it (button_reply, list_reply, nfm_reply with response_json).
+	ButtonID    string `json:"button_id,omitempty"`
+	Interactive any    `json:"interactive,omitempty"`
+}
+
+// FlowResponseEventData is the data for message.flow_response, fired when a
+// contact submits a WhatsApp Flow. ResponseJSON is the nfm_reply.response_json
+// string exactly as Meta sent it; Response is the same JSON already parsed
+// (omitted if it is not valid JSON).
+type FlowResponseEventData struct {
+	MessageID                string         `json:"message_id"`
+	WhatsAppMessageID        string         `json:"whatsapp_message_id"`
+	ContactID                string         `json:"contact_id"`
+	ContactPhone             string         `json:"contact_phone"`
+	ContactName              string         `json:"contact_name"`
+	WhatsAppAccount          string         `json:"whatsapp_account"`
+	FlowName                 string         `json:"flow_name,omitempty"`
+	Body                     string         `json:"body,omitempty"`
+	FlowToken                string         `json:"flow_token,omitempty"`
+	ResponseJSON             string         `json:"response_json"`
+	Response                 map[string]any `json:"response,omitempty"`
+	ReplyToWhatsAppMessageID string         `json:"reply_to_whatsapp_message_id,omitempty"` // wamid of the flow message the contact opened
 }
 
 // Message failure sources reported in MessageFailedEventData.Source
@@ -98,6 +123,19 @@ type MessageStatusEventData struct {
 	PricingCategory string     `json:"pricing_category,omitempty"`
 }
 
+// TemplateStatusEventData is the data for template.status_updated, fired when
+// Meta reports a template status change (APPROVED, REJECTED, PAUSED,
+// DISABLED, ...) for a WhatsApp account's WABA.
+type TemplateStatusEventData struct {
+	WhatsAppAccount string `json:"whatsapp_account"`
+	WABAID          string `json:"waba_id"`
+	TemplateName    string `json:"template_name"`
+	Language        string `json:"language"`
+	Status          string `json:"status"`
+	PreviousStatus  string `json:"previous_status,omitempty"` // empty when the template is not synced here
+	Reason          string `json:"reason,omitempty"`
+}
+
 // ContactEventData represents data for contact events
 type ContactEventData struct {
 	ContactID       string `json:"contact_id"`
@@ -151,6 +189,9 @@ func (a *App) dispatchWebhookAsync(ctx context.Context, orgID uuid.UUID, eventTy
 		if !containsEvent(webhook.Events, eventType) {
 			continue
 		}
+		if !webhookWantsAccount(webhook, data) {
+			continue
+		}
 
 		// Check if context was cancelled
 		if ctx.Err() != nil {
@@ -169,6 +210,36 @@ func (a *App) dispatchWebhookAsync(ctx context.Context, orgID uuid.UUID, eventTy
 	}
 
 	wg.Wait()
+}
+
+// webhookAccountScoped is implemented by event data that belongs to one
+// WhatsApp account, so webhooks limited to some accounts can skip the rest.
+type webhookAccountScoped interface {
+	webhookAccountName() string
+}
+
+func (d MessageEventData) webhookAccountName() string       { return d.WhatsAppAccount }
+func (d MessageFailedEventData) webhookAccountName() string { return d.WhatsAppAccount }
+func (d MessageStatusEventData) webhookAccountName() string { return d.WhatsAppAccount }
+func (d FlowResponseEventData) webhookAccountName() string  { return d.WhatsAppAccount }
+func (d ContactEventData) webhookAccountName() string       { return d.WhatsAppAccount }
+func (d TransferEventData) webhookAccountName() string      { return d.WhatsAppAccount }
+func (d TemplateStatusEventData) webhookAccountName() string {
+	return d.WhatsAppAccount
+}
+
+// webhookWantsAccount reports whether a webhook should get an event: always
+// when it has no account filter or the event names no account, otherwise only
+// for its listed accounts.
+func webhookWantsAccount(webhook models.Webhook, data any) bool {
+	if len(webhook.WhatsAppAccounts) == 0 {
+		return true
+	}
+	scoped, ok := data.(webhookAccountScoped)
+	if !ok || scoped.webhookAccountName() == "" {
+		return true
+	}
+	return containsEvent(webhook.WhatsAppAccounts, scoped.webhookAccountName())
 }
 
 func containsEvent(events models.StringArray, event string) bool {
@@ -193,10 +264,27 @@ func (a *App) sendWebhook(ctx context.Context, webhook models.Webhook, eventType
 		return
 	}
 
-	headers := webhookRequestHeaders(webhook, jsonData)
-	deliveryID := a.startWebhookDelivery(webhook, eventType, data, jsonData, headers)
+	deliveryID := uuid.New()
+	headers := webhookRequestHeaders(webhook, jsonData, deliveryID)
+	deliveryID = a.startWebhookDelivery(deliveryID, webhook, eventType, data, jsonData, headers)
 
-	// Retry logic with exponential backoff
+	// Durable path: queue the delivery before the first attempt, so a restart
+	// mid-attempt still retries it. Without a delivery record or Redis, fall
+	// back to retrying in memory.
+	if deliveryID != uuid.Nil && a.Redis != nil {
+		if err := a.queueWebhookRetry(ctx, deliveryID, time.Now().Add(webhookRetryLease)); err == nil {
+			a.attemptWebhookDelivery(ctx, webhook, deliveryID, 1, jsonData, headers)
+			return
+		} else {
+			a.Log.Error("Failed to queue webhook delivery, retrying in memory", "error", err, "delivery_id", deliveryID)
+		}
+	}
+	a.sendWebhookWithMemoryRetries(ctx, webhook, eventType, deliveryID, jsonData, headers)
+}
+
+// sendWebhookWithMemoryRetries is the fallback when a delivery cannot be
+// queued: 3 attempts with 1s/2s backoff, lost if the process stops.
+func (a *App) sendWebhookWithMemoryRetries(ctx context.Context, webhook models.Webhook, eventType string, deliveryID uuid.UUID, jsonData []byte, headers map[string]string) {
 	maxRetries := 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Check if context was cancelled before retry
@@ -229,7 +317,6 @@ func (a *App) sendWebhook(ctx context.Context, webhook models.Webhook, eventType
 			continue
 		}
 
-		// Success
 		a.Log.Debug("webhook delivered",
 			"webhook_id", webhook.ID,
 			"event", eventType,
@@ -249,10 +336,15 @@ func (a *App) sendWebhook(ctx context.Context, webhook models.Webhook, eventType
 // defaults, the webhook's custom headers (which may override the defaults) and
 // the HMAC signature. The same map is recorded in the delivery log, so the log
 // shows exactly what was sent.
-func webhookRequestHeaders(webhook models.Webhook, jsonData []byte) map[string]string {
+func webhookRequestHeaders(webhook models.Webhook, jsonData []byte, deliveryID uuid.UUID) map[string]string {
 	headers := map[string]string{
 		"Content-Type": "application/json",
 		"User-Agent":   "Whatomate-Webhook/1.0",
+	}
+	// Same on every attempt of a delivery, so receivers can drop duplicates
+	// (a retry can repeat an attempt that succeeded just before a restart).
+	if deliveryID != uuid.Nil {
+		headers["X-Webhook-Delivery-Id"] = deliveryID.String()
 	}
 
 	// Add custom headers from webhook config

@@ -759,6 +759,8 @@ export interface Webhook {
   has_secret: boolean
   created_at: string
   updated_at: string
+  // Empty: events from every WhatsApp account
+  whatsapp_accounts: string[]
 }
 
 export interface WebhookEvent {
@@ -1072,6 +1074,7 @@ export const webhooksService = {
     events: string[]
     headers?: Record<string, string>
     secret?: string
+    whatsapp_accounts?: string[]
   }) => api.post<Webhook>('/webhooks', data),
   update: (id: string, data: {
     name?: string
@@ -1080,6 +1083,7 @@ export const webhooksService = {
     headers?: Record<string, string>
     secret?: string
     is_active?: boolean
+    whatsapp_accounts?: string[]
   }) => api.put<Webhook>(`/webhooks/${id}`, data),
   delete: (id: string) => api.delete(`/webhooks/${id}`),
   test: (id: string) => api.post(`/webhooks/${id}/test`)

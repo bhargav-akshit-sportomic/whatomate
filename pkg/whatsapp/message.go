@@ -571,24 +571,86 @@ func ButtonURLParamsToComponents(buttonParams map[string]string, templateButtons
 // ctaText is the button text, flowToken is a unique token for tracking the flow response,
 // and firstScreen is the name of the first screen to navigate to
 func (c *Client) SendFlowMessage(ctx context.Context, account *Account, rcpt Recipient, flowID, headerText, bodyText, ctaText, flowToken, firstScreen string) (string, error) {
+	return c.SendFlow(ctx, account, rcpt, FlowMessage{
+		FlowID:      flowID,
+		HeaderText:  headerText,
+		BodyText:    bodyText,
+		CTAText:     ctaText,
+		FlowToken:   flowToken,
+		FirstScreen: firstScreen,
+	})
+}
+
+// Flow actions accepted by Meta for a flow message
+const (
+	FlowActionNavigate     = "navigate"
+	FlowActionDataExchange = "data_exchange"
+)
+
+// FlowMessage is a WhatsApp Flow message where the caller controls the
+// flow_token and the flow action, so an external system can launch a flow
+// whose data_exchange endpoint reads its own token.
+type FlowMessage struct {
+	FlowID         string
+	HeaderText     string
+	HeaderImageURL string // image header (takes precedence over HeaderText)
+	BodyText       string
+	CTAText        string
+	FlowToken      string // generated when empty
+	// FlowAction is navigate (default) or data_exchange. data_exchange makes
+	// Meta call the flow's endpoint for the first screen, so no payload is sent.
+	FlowAction     string
+	FirstScreen    string         // navigate only; FIRST_SCREEN when empty
+	FlowActionData map[string]any // navigate only: initial data for the first screen
+}
+
+// SendFlow sends an interactive WhatsApp Flow message.
+func (c *Client) SendFlow(ctx context.Context, account *Account, rcpt Recipient, m FlowMessage) (string, error) {
+	flowID, bodyText := m.FlowID, m.BodyText
 	if flowID == "" {
 		return "", fmt.Errorf("flow ID is required")
 	}
 	if bodyText == "" {
 		return "", fmt.Errorf("body text is required")
 	}
+	ctaText := m.CTAText
 	if ctaText == "" {
 		ctaText = "Open" // Default CTA text
 	}
+	flowToken := m.FlowToken
 	if flowToken == "" {
 		flowToken = fmt.Sprintf("flow_%d", time.Now().UnixNano())
 	}
-	if firstScreen == "" {
-		firstScreen = "FIRST_SCREEN" // Default fallback
+	flowAction := m.FlowAction
+	if flowAction == "" {
+		flowAction = FlowActionNavigate
+	}
+	if flowAction != FlowActionNavigate && flowAction != FlowActionDataExchange {
+		return "", fmt.Errorf("flow_action must be %q or %q", FlowActionNavigate, FlowActionDataExchange)
 	}
 
 	// Truncate CTA text to 20 chars (WhatsApp limit)
 	ctaText = truncateLabel(ctaText, 20)
+
+	parameters := map[string]any{
+		"flow_message_version": "3",
+		"flow_token":           flowToken,
+		"flow_id":              flowID,
+		"flow_cta":             ctaText,
+		"flow_action":          flowAction,
+	}
+	// Meta requires flow_action_payload for navigate and rejects it otherwise
+	if flowAction == FlowActionNavigate {
+		firstScreen := m.FirstScreen
+		if firstScreen == "" {
+			firstScreen = "FIRST_SCREEN" // Default fallback
+		}
+		actionPayload := map[string]any{"screen": firstScreen}
+		if len(m.FlowActionData) > 0 {
+			actionPayload["data"] = m.FlowActionData
+		}
+		parameters["flow_action_payload"] = actionPayload
+	}
 
 	interactive := map[string]any{
 		"type": "flow",
@@ -596,25 +658,21 @@ func (c *Client) SendFlowMessage(ctx context.Context, account *Account, rcpt Rec
 			"text": bodyText,
 		},
 		"action": map[string]any{
-			"name": "flow",
-			"parameters": map[string]any{
-				"flow_message_version": "3",
-				"flow_token":           flowToken,
-				"flow_id":              flowID,
-				"flow_cta":             ctaText,
-				"flow_action":          "navigate",
-				"flow_action_payload": map[string]any{
-					"screen": firstScreen,
-				},
-			},
+			"name":       "flow",
+			"parameters": parameters,
 		},
 	}
 
 	// Add header if provided
-	if headerText != "" {
+	if m.HeaderImageURL != "" {
+		interactive["header"] = map[string]any{
+			"type":  "image",
+			"image": map[string]any{"link": m.HeaderImageURL},
+		}
+	} else if m.HeaderText != "" {
 		interactive["header"] = map[string]any{
 			"type": "text",
-			"text": headerText,
+			"text": m.HeaderText,
 		}
 	}
 

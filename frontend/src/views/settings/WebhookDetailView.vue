@@ -3,7 +3,7 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
-import { webhooksService, webhookLogsService, type Webhook, type WebhookEvent, type WebhookLog } from '@/services/api'
+import { webhooksService, webhookLogsService, accountsService, type Webhook, type WebhookEvent, type WebhookLog } from '@/services/api'
 import WebhookLogDetailSheet from '@/components/webhooks/WebhookLogDetailSheet.vue'
 import { formatLogTime, webhookDeliveryStatusClass } from '@/lib/logs'
 import { toast } from 'vue-sonner'
@@ -101,7 +101,31 @@ const form = ref({
   secret: '',
   headers: {} as Record<string, string>,
   is_active: true,
+  whatsapp_accounts: [] as string[],
 })
+
+// WhatsApp accounts the webhook can be limited to; none ticked = all accounts
+const accountNames = ref<string[]>([])
+
+async function fetchAccountNames() {
+  try {
+    const response = await accountsService.list()
+    const accounts = (response.data as any).data?.accounts || []
+    accountNames.value = accounts.map((a: { name: string }) => a.name)
+  } catch {
+    // Without the list the filter section stays empty; the webhook keeps its current filter
+  }
+}
+
+function toggleAccount(name: string, checked: boolean | 'indeterminate') {
+  const selected = form.value.whatsapp_accounts
+  if (checked === true) {
+    if (!selected.includes(name)) selected.push(name)
+  } else {
+    const index = selected.indexOf(name)
+    if (index > -1) selected.splice(index, 1)
+  }
+}
 
 const breadcrumbs = computed(() => [
   { label: t('nav.settings'), href: '/settings' },
@@ -144,6 +168,7 @@ function syncForm() {
     secret: '',
     headers: { ...webhook.value.headers },
     is_active: webhook.value.is_active,
+    whatsapp_accounts: [...(webhook.value.whatsapp_accounts || [])],
   }
 }
 
@@ -194,6 +219,7 @@ async function save() {
       events: form.value.events,
       headers: form.value.headers,
       secret: form.value.secret || undefined,
+      whatsapp_accounts: form.value.whatsapp_accounts,
     }
 
     if (isNew.value) {
@@ -245,7 +271,7 @@ async function deleteWebhook() {
 }
 
 onMounted(async () => {
-  await fetchAvailableEvents()
+  await Promise.all([fetchAvailableEvents(), fetchAccountNames()])
   if (isNew.value) {
     isLoading.value = false
     hasChanges.value = false
@@ -316,6 +342,21 @@ onMounted(async () => {
                 </div>
               </div>
             </div>
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-xs">{{ $t('webhooks.whatsappAccounts') }}</Label>
+            <div class="grid grid-cols-1 gap-2 border rounded-lg p-3">
+              <div v-for="name in accountNames" :key="name" class="flex items-center gap-2">
+                <Checkbox
+                  :id="`webhook-account-${name}`"
+                  :checked="form.whatsapp_accounts.includes(name)"
+                  @update:checked="(checked) => toggleAccount(name, checked)"
+                  :disabled="!canWrite"
+                />
+                <Label :for="`webhook-account-${name}`" class="cursor-pointer">{{ name }}</Label>
+              </div>
+            </div>
+            <p class="text-xs text-muted-foreground">{{ $t('webhooks.whatsappAccountsHint') }}</p>
           </div>
           <div class="space-y-1.5">
             <Label class="text-xs">{{ $t('webhooks.secret') }}</Label>

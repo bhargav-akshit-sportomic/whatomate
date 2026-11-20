@@ -432,6 +432,48 @@ curl -X POST "http://your-server:8080/api/contacts/{contact_id}/messages" \
 The flow must belong to your organization, otherwise `400 Flow not found for this organization`.
 Omitting `flow_id` returns `400 flow_id is required to send a flow`.
 
+Optional flow fields:
+
+| Field | Description |
+|-------|-------------|
+| `flow_token` | Your own token. Meta echoes it to the flow's data endpoint and in the reply. Generated when omitted |
+| `flow_action` | `navigate` (default) or `data_exchange`. `data_exchange` makes Meta call the flow's endpoint for the first screen, so `first_screen` and `flow_action_data` are ignored |
+| `flow_action_data` | `navigate` only: initial data for the first screen |
+| `header_image_url` | Image header (public URL). Takes precedence over `header` |
+
+## Send to a Phone Number
+
+```
+POST /api/messages/send
+```
+
+Sends a text or interactive (button, list, `cta_url`, flow) session message by phone number. The contact
+is created when it does not exist. Same body as [Send Interactive Message](#send-interactive-message) plus
+`phone_number` (country code, digits; a leading `+`, spaces and dashes are stripped).
+
+The send is synchronous: `200` returns `status: "sent"` and the `wamid`; when Meta rejects the message the
+response is `502` with Meta's error and the message (`status: "failed"`) in `data`.
+
+For flows, the flow does not need to exist in Whatomate: flows built directly in Meta work, and Meta rejects a
+flow that is not on the sending number's WABA.
+
+```json
+{
+  "phone_number": "919876543210",
+  "whatsapp_account": "main",
+  "type": "interactive",
+  "interactive": {
+    "type": "flow",
+    "flow_id": "<meta_flow_id>",
+    "body": "Book a court",
+    "button_text": "Book now",
+    "flow_token": "booking-7f3a",
+    "flow_action": "data_exchange",
+    "header_image_url": "https://cdn.example.com/court.jpg"
+  }
+}
+```
+
 ### Voice Call Button
 
 ```json

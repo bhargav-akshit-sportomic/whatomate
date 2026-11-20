@@ -86,6 +86,7 @@ POST /api/webhooks
 | `headers` | object | No | Custom headers sent with every delivery |
 | `secret` | string | No | HMAC signing secret. If omitted, one is auto-generated |
 | `is_active` | boolean | No | Whether the webhook is enabled |
+| `whatsapp_accounts` | string[] | No | Only send events of these WhatsApp accounts (by name). Empty or omitted: every account. On update, omit to keep the current list, `[]` to clear it |
 
 ```json
 {
@@ -158,6 +159,8 @@ API returns `502 Bad Gateway`.
 | `message.failed` | An outgoing message fails to send, or Meta reports it as failed |
 | `message.delivered` | Meta reports an outgoing message was delivered to the contact's phone |
 | `message.read` | Meta reports the contact read an outgoing message |
+| `message.flow_response` | A contact submits a WhatsApp Flow (carries the flow's `response_json`) |
+| `template.status_updated` | Meta approves, rejects, pauses or disables a message template |
 | `contact.created` | A new contact is created |
 | `transfer.created` | A transfer to a human agent is requested |
 | `transfer.assigned` | A transfer is assigned to an agent |
@@ -176,6 +179,86 @@ Every delivery is a POST with this envelope:
 ```
 
 The `data` object varies by event (message, contact, or transfer details).
+
+### `message.incoming` Payload
+
+`content` holds the text, caption, or the title of a tapped button or list row. Receivers that route on
+ids also get:
+
+| Field | When |
+|-------|------|
+| `whatsapp_message_id` | Always: the inbound wamid |
+| `button_id` | Reply button or list row `id`, or a template quick-reply `payload` |
+| `interactive` | Interactive replies: Meta's `interactive` object as received (`button_reply`, `list_reply`, or `nfm_reply` with `response_json`) |
+
+```json
+{
+  "event": "message.incoming",
+  "timestamp": "2026-11-20T11:44:02Z",
+  "data": {
+    "message_id": "4c1d…",
+    "whatsapp_message_id": "wamid.HBgM…",
+    "contact_id": "9f0e…",
+    "contact_phone": "919876543210",
+    "contact_name": "Rahul",
+    "message_type": "button_reply",
+    "content": "Excellent",
+    "button_id": "rating_5",
+    "interactive": {"type": "button_reply", "button_reply": {"id": "rating_5", "title": "Excellent"}},
+    "whatsapp_account": "main",
+    "direction": "incoming"
+  }
+}
+```
+
+### `message.flow_response` Payload
+
+Fires once when a contact submits a WhatsApp Flow, in addition to `message.incoming`. `response_json` is
+the string Meta sent; `response` is the same JSON parsed (omitted if it is not valid JSON), and
+`flow_token` is lifted from it. `reply_to_whatsapp_message_id` is the wamid of the flow message the
+contact opened.
+
+```json
+{
+  "event": "message.flow_response",
+  "timestamp": "2026-11-20T11:44:02Z",
+  "data": {
+    "message_id": "4c1d…",
+    "whatsapp_message_id": "wamid.HBgM…",
+    "contact_id": "9f0e…",
+    "contact_phone": "919876543210",
+    "contact_name": "Rahul",
+    "whatsapp_account": "main",
+    "flow_name": "flow",
+    "body": "Sent",
+    "flow_token": "booking-7f3a",
+    "response_json": "{\"action\":\"confirm_booking\",\"flow_token\":\"booking-7f3a\"}",
+    "response": {"action": "confirm_booking", "flow_token": "booking-7f3a"},
+    "reply_to_whatsapp_message_id": "wamid.HBgL…"
+  }
+}
+```
+
+### `template.status_updated` Payload
+
+Fires for each WhatsApp account on the template's WABA, also for templates created directly in Meta
+and never synced here (then `previous_status` is omitted).
+
+```json
+{
+  "event": "template.status_updated",
+  "timestamp": "2026-11-20T11:44:02Z",
+  "data": {
+    "whatsapp_account": "main",
+    "waba_id": "1234567890",
+    "template_name": "booking_confirmation",
+    "language": "en",
+    "status": "PAUSED",
+    "previous_status": "APPROVED",
+    "reason": "LOW_QUALITY"
+  }
+}
+```
 
 ### `message.failed` Payload
 
@@ -281,16 +364,21 @@ against the value after the `sha256=` prefix.
 
 ### Retries
 
-A delivery is attempted at most **3 times** total (the initial attempt plus 2 retries), with a 2s
-and then 4s pause before each retry. A network error or any non-2xx response counts as a failure;
-after the third failure the delivery is not retried again. Every delivery and attempt is
-recorded in the [webhook logs](/whatomate/api-reference/webhook-logs).
+The first attempt is sent right away. A network error or any non-2xx response counts as a failure,
+and failed deliveries are retried after 5s, 30s, 2m, 5m, 15m, 30m, 1h, 2h and 4h: **10 attempts**
+over about 8 hours. Retries are queued in Redis (the request body is kept in the delivery log), so
+they survive restarts; a delivery is queued before its first attempt, so one cut short by a crash is
+sent again. While a delivery waits, the [webhook logs](/whatomate/api-reference/webhook-logs) show it
+as `processing` with `next_attempt_at`. A retry uses the webhook's current URL, headers and secret; if
+the webhook was disabled or deleted the delivery fails without sending. Without Redis, deliveries fall
+back to 3 in-memory attempts.
 
 Each dispatch sends to at most **10 webhooks concurrently**. Retries mean your endpoint can receive
-the same event more than once — make it idempotent.
+the same event more than once (for example, an attempt that succeeded just before a restart is
+repeated), so deduplicate on `X-Webhook-Delivery-Id`, which is the same on every attempt of a delivery.
 
-Every request carries `Content-Type: application/json` and `User-Agent: Whatomate-Webhook/1.0`,
-plus any custom `headers` you configured.
+Every request carries `Content-Type: application/json`, `User-Agent: Whatomate-Webhook/1.0` and
+`X-Webhook-Delivery-Id`, plus any custom `headers` you configured.
 
 ### SSRF Protection
 
@@ -484,6 +572,12 @@ Whatomate does this automatically — but **only when both** the `X-Hub-Signatur
 present **and** the WhatsApp account matching the payload's `phone_number_id` has an App Secret
 stored (Settings → Accounts). If either is missing, the payload is accepted without verification.
 Set the App Secret on every account you expose to Meta.
+
+To make verification mandatory, set `require_webhook_signature = true` under `[whatsapp]`
+(env `WHATOMATE_WHATSAPP__REQUIRE_WEBHOOK_SIGNATURE=true`). Then a payload is rejected with `403` unless
+its signature matches the App Secret of an account it references (by `phone_number_id`, or by WABA id for
+account-level events such as template status updates). Payloads that reference no account on this server
+are acknowledged and ignored.
 
 <Aside type="caution">
   Keep your webhook verify token and app secret secure. Never expose them in client-side code.

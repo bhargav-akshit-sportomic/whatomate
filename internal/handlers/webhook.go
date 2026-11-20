@@ -172,8 +172,20 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 	}
 
 	// Verify webhook signature before processing any fields.
-	// Find a phoneNumberID from any change to look up the account's AppSecret.
-	if len(signature) > 0 {
+	if a.Config.WhatsApp.RequireWebhookSignature {
+		secrets, knownAccounts := a.webhookSigningSecrets(payload)
+		if knownAccounts == 0 {
+			// Nothing in this payload belongs to an account here; ack so Meta stops retrying.
+			a.Log.Warn("Ignoring webhook for unknown accounts")
+			return r.SendEnvelope(map[string]string{"status": "ignored"})
+		}
+		if !signatureMatchesAny(body, signature, secrets) {
+			a.Log.Warn("Rejected webhook: missing or invalid signature",
+				"has_signature", len(signature) > 0, "app_secrets", len(secrets))
+			return r.SendErrorEnvelope(fasthttp.StatusForbidden, "Invalid signature", nil, "")
+		}
+	} else if len(signature) > 0 {
+		// Find a phoneNumberID from any change to look up the account's AppSecret.
 		for _, entry := range payload.Entry {
 			for _, change := range entry.Changes {
 				phoneNumberID := change.Value.Metadata.PhoneNumberID
@@ -618,6 +630,12 @@ func (a *App) processTemplateStatusUpdate(wabaID, event, templateName, templateL
 
 	// Update template for each account that has it
 	for _, account := range accounts {
+		// Status before the change, for the webhook event (empty if not synced here)
+		var previousStatus string
+		a.DB.Model(&models.Template{}).
+			Where("whats_app_account = ? AND name = ? AND language = ?", account.Name, templateName, templateLanguage).
+			Limit(1).Pluck("status", &previousStatus)
+
 		// Find and update the template
 		result := a.DB.Model(&models.Template{}).
 			Where("whats_app_account = ? AND name = ? AND language = ?", account.Name, templateName, templateLanguage).
@@ -642,7 +660,77 @@ func (a *App) processTemplateStatusUpdate(wabaID, event, templateName, templateL
 				"reason", reason,
 			)
 		}
+
+		// Fired even when the template is not synced here: templates are
+		// often created directly in Meta.
+		a.DispatchWebhook(account.OrganizationID, models.WebhookEventTemplateStatusUpdated, TemplateStatusEventData{
+			WhatsAppAccount: account.Name,
+			WABAID:          wabaID,
+			TemplateName:    templateName,
+			Language:        templateLanguage,
+			Status:          status,
+			PreviousStatus:  previousStatus,
+			Reason:          reason,
+		})
 	}
+}
+
+// webhookSigningSecrets returns the App Secrets of the accounts a Meta
+// webhook payload references (by phone_number_id, or by WABA id for
+// account-level changes such as template status updates) and how many such
+// accounts exist here. Meta signs each delivery with one app's secret, so a
+// genuine payload matches at least one of them.
+func (a *App) webhookSigningSecrets(payload WebhookPayload) ([][]byte, int) {
+	var secrets [][]byte
+	seen := map[string]bool{}
+	known := 0
+	add := func(acc *models.WhatsAppAccount) {
+		known++
+		if acc.AppSecret != "" && !seen[acc.AppSecret] {
+			seen[acc.AppSecret] = true
+			secrets = append(secrets, []byte(acc.AppSecret))
+		}
+	}
+	for _, entry := range payload.Entry {
+		hasPhone := false
+		for _, change := range entry.Changes {
+			phoneNumberID := change.Value.Metadata.PhoneNumberID
+			if phoneNumberID == "" {
+				continue
+			}
+			hasPhone = true
+			if acc, err := a.getWhatsAppAccountCached(phoneNumberID); err == nil {
+				add(acc)
+			}
+		}
+		if hasPhone || entry.ID == "" {
+			continue
+		}
+		var accounts []models.WhatsAppAccount
+		if err := a.DB.Where("business_id = ?", entry.ID).Find(&accounts).Error; err != nil {
+			a.Log.Error("Failed to load accounts for webhook signature", "waba_id", entry.ID, "error", err)
+			continue
+		}
+		for i := range accounts {
+			a.decryptAccountSecrets(&accounts[i])
+			add(&accounts[i])
+		}
+	}
+	return secrets, known
+}
+
+// signatureMatchesAny reports whether signature is a valid X-Hub-Signature-256
+// for body under any of the secrets.
+func signatureMatchesAny(body, signature []byte, secrets [][]byte) bool {
+	if len(signature) == 0 {
+		return false
+	}
+	for _, secret := range secrets {
+		if verifyWebhookSignature(body, signature, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyWebhookSignature verifies the X-Hub-Signature-256 header from Meta.

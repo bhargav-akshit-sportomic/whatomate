@@ -60,6 +60,9 @@ base_url = "https://graph.facebook.com"
 app_id = ""      # Meta App ID for Embedded Signup
 app_secret = ""  # Meta App Secret
 config_id = ""  # WhatsApp Config ID for frontend login
+# Reject Meta webhooks without a valid X-Hub-Signature-256 (needs an App Secret on every account).
+# Recommended in production.
+require_webhook_signature = false
 
 # Auth cookie settings (tokens are stored in httpOnly cookies)
 [cookie]

@@ -261,6 +261,10 @@ type Webhook struct {
 	Headers        JSONB       `gorm:"type:jsonb;default:'{}'" json:"headers"`
 	Secret         string      `gorm:"size:255" json:"-"` // For HMAC signature
 	IsActive       bool        `gorm:"default:true" json:"is_active"`
+	// WhatsAppAccounts limits the webhook to events of these accounts (by
+	// name). Empty means every account, so a bulk campaign on one number does
+	// not flood a receiver that only cares about another.
+	WhatsAppAccounts StringArray `gorm:"type:jsonb;default:'[]'" json:"whatsapp_accounts"`
 
 	// Relations
 	Organization *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`

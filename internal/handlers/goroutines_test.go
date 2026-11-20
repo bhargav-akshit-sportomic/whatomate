@@ -338,9 +338,21 @@ func TestApp_DispatchWebhook_RetryOnFailure(t *testing.T) {
 
 	app.DispatchWebhook(org.ID, models.WebhookEventMessageIncoming, map[string]string{"test": "data"})
 	app.WaitForBackgroundTasks()
+	assert.Equal(t, int32(1), requestCount.Load(), "the first attempt is sent right away")
 
-	// Should have retried (3 attempts total)
+	// Later attempts come from the Redis retry queue; make them due and run it.
+	var delivery models.WebhookDelivery
+	require.NoError(t, app.DB.Where("webhook_id = ?", webhook.ID).First(&delivery).Error)
+	t.Cleanup(func() { app.Redis.ZRem(context.Background(), "whatomate:webhook_retries", delivery.ID.String()) })
+	for range 2 {
+		require.NoError(t, app.Redis.ZAdd(context.Background(), "whatomate:webhook_retries",
+			redis.Z{Score: 0, Member: delivery.ID.String()}).Err())
+		app.ProcessDueWebhookRetries(context.Background())
+	}
+
 	assert.Equal(t, int32(3), requestCount.Load(), "should retry on failure")
+	require.NoError(t, app.DB.First(&delivery, "id = ?", delivery.ID).Error)
+	assert.Equal(t, models.WebhookDeliverySuccess, delivery.Status)
 }
 
 func TestApp_DispatchWebhook_HTTPTimeout(t *testing.T) {

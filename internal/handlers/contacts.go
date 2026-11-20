@@ -566,6 +566,78 @@ type InteractiveContent struct {
 	FlowID      string `json:"flow_id,omitempty"`
 	FirstScreen string `json:"first_screen,omitempty"`
 	Header      string `json:"header,omitempty"`
+	// flow only, optional: a caller-chosen flow_token (echoed back by Meta to
+	// the flow's data_exchange endpoint and in the nfm_reply), the flow action
+	// ("navigate" default, or "data_exchange"), initial screen data for
+	// navigate, and an image header (takes precedence over Header).
+	FlowToken      string         `json:"flow_token,omitempty"`
+	FlowAction     string         `json:"flow_action,omitempty"`
+	FlowActionData map[string]any `json:"flow_action_data,omitempty"`
+	HeaderImageURL string         `json:"header_image_url,omitempty"`
+}
+
+// applyInteractiveContent maps a button, list, cta_url or flow request onto
+// msgReq and returns a client error message ("" when the request is valid).
+// requireOrgFlow keeps the agent endpoint's rule that a flow must be one of
+// the org's saved flows; API callers that build flows directly in Meta skip
+// it, and Meta itself rejects a flow that is not on the sending WABA.
+func (a *App) applyInteractiveContent(msgReq *OutgoingMessageRequest, req SendMessageRequest, orgID uuid.UUID, contact *models.Contact, requireOrgFlow bool) string {
+	in := req.Interactive
+	msgReq.InteractiveType = in.Type
+	msgReq.BodyText = in.Body
+	msgReq.ButtonText = in.ButtonText
+	msgReq.URL = in.URL
+
+	// Convert buttons
+	if len(in.Buttons) > 0 {
+		msgReq.Buttons = make([]whatsapp.Button, len(in.Buttons))
+		for i, btn := range in.Buttons {
+			msgReq.Buttons[i] = whatsapp.Button{
+				ID:    btn.ID,
+				Title: btn.Title,
+			}
+		}
+	}
+
+	if in.Type != "flow" {
+		return ""
+	}
+	if in.FlowID == "" {
+		return "flow_id is required to send a flow"
+	}
+	if in.FlowAction != "" && in.FlowAction != whatsapp.FlowActionNavigate && in.FlowAction != whatsapp.FlowActionDataExchange {
+		return "flow_action must be navigate or data_exchange"
+	}
+	if requireOrgFlow {
+		// Ensure the flow belongs to this org so an agent can't send another
+		// org's flow by supplying its Meta id.
+		var waFlow models.WhatsAppFlow
+		if err := a.DB.Where("meta_flow_id = ? AND organization_id = ?", in.FlowID, orgID).First(&waFlow).Error; err != nil {
+			return "Flow not found for this organization"
+		}
+	}
+	cta := in.ButtonText
+	if cta == "" {
+		cta = "Open"
+	}
+	body := in.Body
+	if body == "" {
+		body = req.Content.Body
+	}
+	msgReq.Type = models.MessageTypeFlow
+	msgReq.FlowID = in.FlowID
+	msgReq.FlowCTA = cta
+	msgReq.FlowHeader = in.Header
+	msgReq.FlowHeaderImageURL = in.HeaderImageURL
+	msgReq.FlowFirstScreen = in.FirstScreen
+	msgReq.FlowAction = in.FlowAction
+	msgReq.FlowActionData = in.FlowActionData
+	msgReq.BodyText = body
+	msgReq.FlowToken = in.FlowToken
+	if msgReq.FlowToken == "" {
+		msgReq.FlowToken = fmt.Sprintf("agent_%s_%d", contact.ID, time.Now().UnixNano())
+	}
+	return ""
 }
 
 // ButtonContent represents a button in interactive messages
@@ -633,47 +705,8 @@ func (a *App) SendMessage(r *fastglue.Request) error {
 
 	// Handle interactive messages
 	if req.Type == models.MessageTypeInteractive && req.Interactive != nil {
-		msgReq.InteractiveType = req.Interactive.Type
-		msgReq.BodyText = req.Interactive.Body
-		msgReq.ButtonText = req.Interactive.ButtonText
-		msgReq.URL = req.Interactive.URL
-
-		// Convert buttons
-		if len(req.Interactive.Buttons) > 0 {
-			msgReq.Buttons = make([]whatsapp.Button, len(req.Interactive.Buttons))
-			for i, btn := range req.Interactive.Buttons {
-				msgReq.Buttons[i] = whatsapp.Button{
-					ID:    btn.ID,
-					Title: btn.Title,
-				}
-			}
-		}
-
-		if req.Interactive.Type == "flow" {
-			if req.Interactive.FlowID == "" {
-				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "flow_id is required to send a flow", nil, "")
-			}
-			// Ensure the flow belongs to this org so an agent can't send another
-			// org's flow by supplying its Meta id.
-			var waFlow models.WhatsAppFlow
-			if err := a.DB.Where("meta_flow_id = ? AND organization_id = ?", req.Interactive.FlowID, orgID).First(&waFlow).Error; err != nil {
-				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Flow not found for this organization", nil, "")
-			}
-			cta := req.Interactive.ButtonText
-			if cta == "" {
-				cta = "Open"
-			}
-			body := req.Interactive.Body
-			if body == "" {
-				body = req.Content.Body
-			}
-			msgReq.Type = models.MessageTypeFlow
-			msgReq.FlowID = req.Interactive.FlowID
-			msgReq.FlowCTA = cta
-			msgReq.FlowHeader = req.Interactive.Header
-			msgReq.FlowFirstScreen = req.Interactive.FirstScreen
-			msgReq.BodyText = body
-			msgReq.FlowToken = fmt.Sprintf("agent_%s_%d", contact.ID, time.Now().UnixNano())
+		if errMsg := a.applyInteractiveContent(&msgReq, req, orgID, &contact, true); errMsg != "" {
+			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, errMsg, nil, "")
 		}
 
 		if req.Interactive.Type == "voice_call" {

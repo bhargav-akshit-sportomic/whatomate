@@ -302,3 +302,97 @@ func TestApp_WebhookHandler_EmptyEntryAccepted(t *testing.T) {
 	require.NoError(t, app.WebhookHandler(req))
 	assert.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
 }
+
+// --- require_webhook_signature ---
+
+func newStrictWebhookApp(t *testing.T) *handlers.App {
+	t.Helper()
+	app := newAppForWebhook(t, "")
+	app.Config.WhatsApp.RequireWebhookSignature = true
+	app.Config.App.EncryptionKey = "test-encryption-key-32-bytes-long"
+	return app
+}
+
+func createWebhookAccount(t *testing.T, app *handlers.App, phoneID, wabaID, appSecret string) {
+	t.Helper()
+	org := testutil.CreateTestOrganization(t, app.DB)
+	require.NoError(t, app.DB.Create(&models.WhatsAppAccount{
+		BaseModel:          models.BaseModel{ID: uuid.New()},
+		OrganizationID:     org.ID,
+		Name:               "strict-" + uuid.New().String()[:6],
+		PhoneID:            phoneID,
+		BusinessID:         wabaID,
+		AccessToken:        "tok",
+		AppSecret:          appSecret,
+		WebhookVerifyToken: "vt",
+		APIVersion:         "v18.0",
+		Status:             "active",
+	}).Error)
+}
+
+func postWebhook(t *testing.T, app *handlers.App, body []byte, signature string) int {
+	t.Helper()
+	req := testutil.NewRequest(t)
+	req.RequestCtx.Request.Header.SetMethod("POST")
+	req.RequestCtx.Request.Header.SetContentType("application/json")
+	if signature != "" {
+		req.RequestCtx.Request.Header.Set("X-Hub-Signature-256", signature)
+	}
+	req.RequestCtx.Request.SetBody(body)
+	require.NoError(t, app.WebhookHandler(req))
+	return testutil.GetResponseStatusCode(req)
+}
+
+func TestApp_WebhookHandler_Strict_UnsignedRejected(t *testing.T) {
+	app := newStrictWebhookApp(t)
+	phone := "phone-s1-" + uuid.New().String()[:6]
+	createWebhookAccount(t, app, phone, "waba-s1", "strict-secret")
+
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, makeMessagesPayload(phone), ""),
+		"strict mode must not skip verification when the header is missing")
+}
+
+func TestApp_WebhookHandler_Strict_ValidSignatureAccepted(t *testing.T) {
+	app := newStrictWebhookApp(t)
+	phone := "phone-s2-" + uuid.New().String()[:6]
+	createWebhookAccount(t, app, phone, "waba-s2", "strict-secret")
+
+	body := makeMessagesPayload(phone)
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, body, signWebhook(body, "strict-secret")))
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, signWebhook(body, "other-secret")))
+}
+
+func TestApp_WebhookHandler_Strict_AccountWithoutSecretRejected(t *testing.T) {
+	app := newStrictWebhookApp(t)
+	phone := "phone-s3-" + uuid.New().String()[:6]
+	createWebhookAccount(t, app, phone, "waba-s3", "")
+
+	body := makeMessagesPayload(phone)
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, signWebhook(body, "anything")),
+		"without an App Secret nothing can be verified, so strict mode rejects")
+}
+
+func TestApp_WebhookHandler_Strict_TemplateStatusVerifiedByWABA(t *testing.T) {
+	app := newStrictWebhookApp(t)
+	waba := "waba-s4-" + uuid.New().String()[:6]
+	createWebhookAccount(t, app, "phone-s4-"+uuid.New().String()[:6], waba, "waba-secret")
+
+	body, _ := json.Marshal(map[string]any{
+		"object": "whatsapp_business_account",
+		"entry": []map[string]any{{
+			"id": waba,
+			"changes": []map[string]any{{
+				"field": "message_template_status_update",
+				"value": map[string]any{"event": "APPROVED", "message_template_name": "x", "message_template_language": "en"},
+			}},
+		}},
+	})
+	assert.Equal(t, fasthttp.StatusForbidden, postWebhook(t, app, body, ""))
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, body, signWebhook(body, "waba-secret")))
+}
+
+func TestApp_WebhookHandler_Strict_UnknownAccountIgnored(t *testing.T) {
+	app := newStrictWebhookApp(t)
+	assert.Equal(t, fasthttp.StatusOK, postWebhook(t, app, makeMessagesPayload("phone-unknown-"+uuid.New().String()[:6]), ""),
+		"a payload for no account here is acked and ignored")
+}

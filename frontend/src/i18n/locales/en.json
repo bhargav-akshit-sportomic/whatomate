@@ -1121,6 +1121,8 @@
     "nameRequired": "Name is required",
     "urlRequired": "URL is required",
     "eventRequired": "At least one event must be selected",
+    "whatsappAccounts": "WhatsApp numbers",
+    "whatsappAccountsHint": "Send only events from the ticked numbers. Leave all unticked to receive events from every number.",
     "testSent": "Test webhook sent successfully",
     "testFailed": "Webhook test failed",
     "confirmDisableTitle": "Disable Webhook",
