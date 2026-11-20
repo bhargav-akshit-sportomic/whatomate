@@ -180,6 +180,12 @@ Every delivery is a POST with this envelope:
 
 The `data` object varies by event (message, contact, or transfer details).
 
+Every event about a WhatsApp account carries `whatsapp_account` (its name in Whatomate) and
+`business_phone`: the account's business number, digits with country code (e.g. `918356850985`).
+Whatomate learns the number from Meta (embedded signup, **Test connection**, and every inbound webhook),
+or you can set `phone_number` when creating or updating the account. Until it is known, `business_phone`
+is omitted.
+
 ### `message.incoming` Payload
 
 `content` holds the text, caption, or the title of a tapped button or list row. Receivers that route on
