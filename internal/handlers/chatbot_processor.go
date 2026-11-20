@@ -1664,9 +1664,10 @@ func (a *App) saveIncomingMessageWithEvent(account *models.WhatsAppAccount, cont
 		WhatsAppAccount:  account.Name,
 		Direction:        models.DirectionIncoming,
 
-		WhatsAppMessageID: whatsappMsgID,
-		ButtonID:          extras.ButtonID,
-		Interactive:       extras.Interactive,
+		WhatsAppMessageID:        whatsappMsgID,
+		ButtonID:                 extras.ButtonID,
+		Interactive:              extras.Interactive,
+		ReplyToWhatsAppMessageID: replyToWAMID,
 	})
 
 	if extras.FlowReply != nil {

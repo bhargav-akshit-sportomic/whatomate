@@ -50,6 +50,10 @@ type MessageEventData struct {
 	Interactive any    `json:"interactive,omitempty"`
 	// Business number of the sending account, digits with country code
 	BusinessPhone string `json:"business_phone,omitempty"`
+	// message.incoming only: Meta's id (wamid) of the message the contact
+	// replied to. Unlike reply_to_message_id it is set even when that message
+	// was not sent through Whatomate (e.g. before a number moved here).
+	ReplyToWhatsAppMessageID string `json:"reply_to_whatsapp_message_id,omitempty"`
 }
 
 // FlowResponseEventData is the data for message.flow_response, fired when a
