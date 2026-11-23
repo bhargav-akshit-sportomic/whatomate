@@ -4,6 +4,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GetOrCreateContact finds or creates a contact for the given phone number.
@@ -57,19 +58,33 @@ func GetOrCreateContact(db *gorm.DB, orgID uuid.UUID, phoneNumber, profileName s
 		PhoneNumber:    normalizedPhone,
 		ProfileName:    profileName,
 	}
-	if err := db.Create(&contact).Error; err != nil {
-		// Race condition: another goroutine may have created the contact
-		if err2 := db.Unscoped().Where("organization_id = ? AND phone_number = ?", orgID, normalizedPhone).First(&contact).Error; err2 == nil {
-			// Restore if soft-deleted
-			if contact.DeletedAt.Valid {
-				db.Unscoped().Model(&contact).Update("deleted_at", nil)
-				contact.DeletedAt.Valid = false
-			}
-			return &contact, false, nil
-		}
+	// Another request may create the same contact at the same moment
+	// (idx_contacts_org_phone). ON CONFLICT DO NOTHING inserts nothing then,
+	// without an error that would abort a surrounding transaction, and the
+	// existing row is loaded below.
+	result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&contact)
+	if result.Error != nil {
+		return nil, false, result.Error
+	}
+	if result.RowsAffected == 1 {
+		return &contact, true, nil
+	}
+
+	// A fresh struct: reusing contact would carry its unsaved ID into the
+	// WHERE clause and never match the row the other request created.
+	var existing models.Contact
+	if err := db.Unscoped().Where("organization_id = ? AND phone_number = ?", orgID, normalizedPhone).First(&existing).Error; err != nil {
 		return nil, false, err
 	}
-	return &contact, true, nil
+	// Restore if soft-deleted
+	if existing.DeletedAt.Valid {
+		db.Unscoped().Model(&existing).Update("deleted_at", nil)
+		existing.DeletedAt.Valid = false
+	}
+	if profileName != "" && existing.ProfileName != profileName {
+		db.Model(&existing).Update("profile_name", profileName)
+	}
+	return &existing, false, nil
 }
 
 // FindContact finds a contact for the given phone number with both forms (normalized and +prefix).

@@ -58,12 +58,14 @@ func New(cfg *config.Config, db *gorm.DB, rdb *redis.Client, log logf.Logger) (*
 
 	publisher := queue.NewPublisher(rdb, log)
 
+	// The WhatsApp client uses the same Meta Graph base URL as the server, so
+	// a mocked or staging base_url also covers campaign sends.
 	return &Worker{
 		Config:         cfg,
 		DB:             db,
 		Redis:          rdb,
 		Log:            log,
-		WhatsApp:       whatsapp.New(log),
+		WhatsApp:       whatsapp.NewWithBaseURL(log, cfg.WhatsApp.BaseURL),
 		Consumer:       consumer,
 		ExportConsumer: exportConsumer,
 		Publisher:      publisher,

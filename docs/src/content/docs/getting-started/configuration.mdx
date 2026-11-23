@@ -233,6 +233,15 @@ Optional, only used when an IVR step needs to synthesize speech (welcome prompt,
 
 If unset, IVR flows still work but cannot synthesize new audio prompts on the fly — only pre-rendered Opus files in `calling.audio_dir` will play.
 
+### `[retention]`
+
+Automatic cleanup, run about once a day; with several instances, only one runs it per day.
+
+- `webhook_logs_days` (default `30`): delete outbound webhook delivery logs older than this. Deliveries still waiting for a retry are kept.
+- `queue_stream_days` (default `14`): trim campaign and export queue entries older than this from Redis.
+
+`0` (or unset) means the default. A negative value turns that cleanup off. Messages are not deleted automatically.
+
 ### `[calling]`
 
 Required only if you use WhatsApp voice calling / IVR.

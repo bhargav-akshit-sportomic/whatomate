@@ -64,6 +64,11 @@ config_id = ""  # WhatsApp Config ID for frontend login
 # Recommended in production.
 require_webhook_signature = false
 
+# Automatic cleanup, run once a day. A negative value turns that cleanup off.
+[retention]
+webhook_logs_days = 30  # webhook delivery logs (deliveries waiting for a retry are kept)
+queue_stream_days = 14  # campaign/export queue entries in Redis
+
 # Auth cookie settings (tokens are stored in httpOnly cookies)
 [cookie]
 domain = ""    # Cookie domain (e.g., ".example.com"). Empty = current host only.
