@@ -123,12 +123,14 @@ func TestApp_SendMessageToPhone_CTAURL(t *testing.T) {
 		"type":             "interactive",
 		"whatsapp_account": env.account.Name,
 		"interactive": map[string]any{
-			"type": "cta_url", "body": "Pay to confirm", "button_text": "Pay now", "url": "https://pay.example.com/x",
+			"type": "cta_url", "header": "Slots reserved", "body": "Pay to confirm", "button_text": "Pay now", "url": "https://pay.example.com/x",
 		},
 	})
 	require.Equal(t, fasthttp.StatusOK, status, string(body))
 	sent := env.mock.sentMessages[len(env.mock.sentMessages)-1]
-	assert.Equal(t, "cta_url", sent["interactive"].(map[string]any)["type"])
+	interactive := sent["interactive"].(map[string]any)
+	assert.Equal(t, "cta_url", interactive["type"])
+	assert.Equal(t, map[string]any{"type": "text", "text": "Slots reserved"}, interactive["header"], "the cta_url header is sent")
 }
 
 func TestApp_SendMessageToPhone_MetaRejectionIs502(t *testing.T) {

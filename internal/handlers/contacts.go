@@ -565,7 +565,7 @@ type InteractiveContent struct {
 	// optional header. Body holds the message text, ButtonText the CTA label.
 	FlowID      string `json:"flow_id,omitempty"`
 	FirstScreen string `json:"first_screen,omitempty"`
-	Header      string `json:"header,omitempty"`
+	Header      string `json:"header,omitempty"` // text header for flow and cta_url
 	// flow only, optional: a caller-chosen flow_token (echoed back by Meta to
 	// the flow's data_exchange endpoint and in the nfm_reply), the flow action
 	// ("navigate" default, or "data_exchange"), initial screen data for
@@ -599,6 +599,9 @@ func (a *App) applyInteractiveContent(msgReq *OutgoingMessageRequest, req SendMe
 		}
 	}
 
+	if in.Type == "cta_url" {
+		msgReq.HeaderText = in.Header
+	}
 	if in.Type != "flow" {
 		return ""
 	}
