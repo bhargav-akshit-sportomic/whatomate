@@ -29,6 +29,19 @@ type Config struct {
 	Cookie       CookieConfig       `koanf:"cookie"`
 	Calling      CallingConfig      `koanf:"calling"`
 	TTS          TTSConfig          `koanf:"tts"`
+
+	Retention RetentionConfig `koanf:"retention"`
+}
+
+// RetentionConfig sets how long automatically cleaned data is kept. 0 means
+// the default; a negative value turns that cleanup off.
+type RetentionConfig struct {
+	// WebhookLogsDays keeps outbound webhook delivery logs this many days
+	// (default 30). Deliveries still waiting for a retry are never deleted.
+	WebhookLogsDays int `koanf:"webhook_logs_days"`
+	// QueueStreamDays trims campaign and export queue entries older than
+	// this many days from Redis (default 14).
+	QueueStreamDays int `koanf:"queue_stream_days"`
 }
 
 type TTSConfig struct {
@@ -282,6 +295,12 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.WhatsApp.BaseURL == "" {
 		cfg.WhatsApp.BaseURL = "https://graph.facebook.com"
+	}
+	if cfg.Retention.WebhookLogsDays == 0 {
+		cfg.Retention.WebhookLogsDays = 30
+	}
+	if cfg.Retention.QueueStreamDays == 0 {
+		cfg.Retention.QueueStreamDays = 14
 	}
 	if cfg.Storage.Type == "" {
 		cfg.Storage.Type = "local"

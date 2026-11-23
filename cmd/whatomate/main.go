@@ -288,6 +288,8 @@ func runServer(args []string) {
 	go app.StartWebhookDeliverySweeper(sweepCtx)
 	// Send webhook retries queued in Redis (survive restarts)
 	go app.StartWebhookRetryProcessor(sweepCtx)
+	// Daily cleanup of old webhook logs and queue entries
+	go app.StartRetentionSweeper(sweepCtx)
 	go app.StartExportSweeper(sweepCtx)
 	go oauth.NewStore(db, rdb, httpClient).StartSweeper(sweepCtx, lo.Error)
 	if err := app.StartExportUpdatesSubscriber(sweepCtx); err != nil {
