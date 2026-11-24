@@ -151,6 +151,12 @@ func (c *Client) SendInteractiveButtons(ctx context.Context, account *Account, r
 // SendCTAURLButton sends an interactive message with a CTA URL button
 // This opens a URL when clicked instead of sending a reply
 func (c *Client) SendCTAURLButton(ctx context.Context, account *Account, rcpt Recipient, bodyText, buttonText, url string) (string, error) {
+	return c.SendCTAURLButtonWithHeader(ctx, account, rcpt, "", bodyText, buttonText, url)
+}
+
+// SendCTAURLButtonWithHeader sends a cta_url interactive message with an
+// optional text header (omitted when headerText is empty).
+func (c *Client) SendCTAURLButtonWithHeader(ctx context.Context, account *Account, rcpt Recipient, headerText, bodyText, buttonText, url string) (string, error) {
 	if buttonText == "" || url == "" {
 		return "", fmt.Errorf("button text and URL are required")
 	}
@@ -170,6 +176,9 @@ func (c *Client) SendCTAURLButton(ctx context.Context, account *Account, rcpt Re
 				"url":          url,
 			},
 		},
+	}
+	if headerText != "" {
+		interactive["header"] = map[string]any{"type": "text", "text": headerText}
 	}
 
 	payload := map[string]any{

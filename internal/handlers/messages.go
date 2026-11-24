@@ -53,6 +53,7 @@ type OutgoingMessageRequest struct {
 	Buttons         []whatsapp.Button // For button/list messages
 	ButtonText      string            // For CTA URL button
 	URL             string            // For CTA URL button
+	HeaderText      string            // Optional text header for a CTA URL button
 
 	// voice_call interactive (WhatsApp Business Calling)
 	DisplayText      string // Button face label
@@ -221,7 +222,7 @@ func (a *App) SendOutgoingMessage(ctx context.Context, req OutgoingMessageReques
 		case models.MessageTypeInteractive:
 			switch req.InteractiveType {
 			case "cta_url":
-				return a.WhatsApp.SendCTAURLButton(sendCtx, waAccount, rcpt, req.BodyText, req.ButtonText, req.URL)
+				return a.WhatsApp.SendCTAURLButtonWithHeader(sendCtx, waAccount, rcpt, req.HeaderText, req.BodyText, req.ButtonText, req.URL)
 			case "voice_call":
 				return a.WhatsApp.SendVoiceCallButton(sendCtx, waAccount, rcpt, req.BodyText, req.DisplayText, req.TTLMinutes, req.VoiceCallPayload)
 			default: // "button" or "list"

@@ -122,3 +122,28 @@ func TestClient_SendFlowMessage_DefaultsUnchanged(t *testing.T) {
 	assert.Equal(t, map[string]any{"screen": "FIRST_SCREEN"}, params["flow_action_payload"])
 	assert.Equal(t, map[string]any{"type": "text", "text": "Title"}, interactive["header"])
 }
+
+func TestClient_SendCTAURLButtonWithHeader(t *testing.T) {
+	t.Parallel()
+	send := func(header string) map[string]any {
+		var captured map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&captured)
+			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]string{{"id": "wamid.cta"}}})
+		}))
+		defer server.Close()
+		client := whatsapp.NewWithTimeout(testutil.NopLogger(), 5*time.Second)
+		client.HTTPClient = &http.Client{Transport: &testServerTransport{serverURL: server.URL}}
+		account := &whatsapp.Account{PhoneID: "1", BusinessID: "2", APIVersion: "v24.0", AccessToken: "t"}
+		_, err := client.SendCTAURLButtonWithHeader(testutil.TestContext(t), account, whatsapp.Recipient{Phone: "919876543210"}, header, "Pay to confirm", "Pay now", "https://pay.example.com/x")
+		require.NoError(t, err)
+		return captured["interactive"].(map[string]any)
+	}
+
+	withHeader := send("Slots reserved")
+	assert.Equal(t, map[string]any{"type": "text", "text": "Slots reserved"}, withHeader["header"])
+	assert.Equal(t, "cta_url", withHeader["type"])
+
+	_, hasHeader := send("")["header"]
+	assert.False(t, hasHeader, "no header object when the header is empty")
+}
